@@ -168,6 +168,101 @@ fn code_for(
     code
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedMonitor {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum Delivery {
+    Delivered,
+    Unconfirmed,
+    Failed { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorOutcome {
+    pub role: u8,
+    pub monitor_id: String,
+    pub delivery: Delivery,
+}
+
+pub trait MonitorControl {
+    fn list_monitors(&mut self) -> Result<Vec<DetectedMonitor>, String>;
+    fn set_input(&mut self, id: &str, code: u8) -> Result<(), String>;
+    fn get_input(&mut self, id: &str) -> Result<u8, String>;
+}
+
+#[derive(Default)]
+pub struct SwitchGate {
+    pub busy: bool,
+}
+
+impl SwitchGate {
+    pub fn run<C: MonitorControl>(
+        &mut self,
+        control: &mut C,
+        settings: &Settings,
+        destination: Destination,
+        connected_ids: &[String],
+    ) -> Result<Vec<MonitorOutcome>, PlanError> {
+        if self.busy {
+            return Err(PlanError::Busy);
+        }
+        let planned = plan_switch(settings, destination, connected_ids)?;
+        self.busy = true;
+        let gate = BusyGuard(&mut self.busy);
+        let mut outcomes = Vec::new();
+        for command in planned {
+            outcomes.push(execute(control, command.role, &command.monitor_id, command.code));
+        }
+        drop(gate);
+        Ok(outcomes)
+    }
+
+    pub fn trial<C: MonitorControl>(
+        &mut self,
+        control: &mut C,
+        id: &str,
+        code: u8,
+    ) -> Result<MonitorOutcome, PlanError> {
+        if self.busy {
+            return Err(PlanError::Busy);
+        }
+        self.busy = true;
+        let gate = BusyGuard(&mut self.busy);
+        let outcome = execute(control, 0, id, code);
+        drop(gate);
+        Ok(outcome)
+    }
+}
+
+struct BusyGuard<'a>(&'a mut bool);
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        *self.0 = false;
+    }
+}
+
+fn execute<C: MonitorControl>(control: &mut C, role: u8, id: &str, code: u8) -> MonitorOutcome {
+    let delivery = match control.set_input(id, code) {
+        Err(reason) => Delivery::Failed { reason },
+        Ok(()) => match control.get_input(id) {
+            Err(_) => Delivery::Unconfirmed,
+            Ok(actual) if actual == code => Delivery::Delivered,
+            Ok(actual) => Delivery::Failed {
+                reason: format!("보낸 번호 {code}와 현재 번호 {actual}이 다릅니다."),
+            },
+        },
+    };
+    MonitorOutcome { role, monitor_id: id.into(), delivery }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +334,101 @@ mod tests {
         let mut same = ready();
         same.monitors.monitor2.as_mut().unwrap().id = "mon-1".into();
         assert!(!is_configured(&same));
+    }
+
+    struct Fake {
+        fail_set: bool,
+        read: ReadMode,
+        sets: Vec<(String, u8)>,
+    }
+
+    enum ReadMode {
+        Match,
+        Fail,
+        Mismatch,
+    }
+
+    impl MonitorControl for Fake {
+        fn list_monitors(&mut self) -> Result<Vec<DetectedMonitor>, String> {
+            Ok(vec![
+                DetectedMonitor { id: "mon-1".into(), name: "하나".into() },
+                DetectedMonitor { id: "mon-2".into(), name: "둘".into() },
+            ])
+        }
+        fn set_input(&mut self, id: &str, code: u8) -> Result<(), String> {
+            self.sets.push((id.into(), code));
+            if self.fail_set && id == "mon-2" {
+                Err("거부".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn get_input(&mut self, _id: &str) -> Result<u8, String> {
+            match self.read {
+                ReadMode::Match => Ok(17),
+                ReadMode::Fail => Err("읽기 실패".into()),
+                ReadMode::Mismatch => Ok(99),
+            }
+        }
+    }
+
+    #[test]
+    fn delivered_when_read_matches_sent_code() {
+        let mut gate = SwitchGate::default();
+        let mut fake = Fake { fail_set: false, read: ReadMode::Match, sets: Vec::new() };
+        let mut settings = ready();
+        settings.monitors.monitor1.as_mut().unwrap().hdmi_code = Some(17);
+        settings.monitors.monitor2.as_mut().unwrap().dp_code = Some(17);
+        let outcomes = gate.run(&mut fake, &settings, Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap();
+        assert!(matches!(outcomes[0].delivery, Delivery::Delivered));
+        assert!(matches!(outcomes[1].delivery, Delivery::Delivered));
+    }
+
+    #[test]
+    fn unconfirmed_when_read_fails() {
+        let mut gate = SwitchGate::default();
+        let mut fake = Fake { fail_set: false, read: ReadMode::Fail, sets: Vec::new() };
+        let outcomes = gate.run(&mut fake, &ready(), Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap();
+        assert!(matches!(outcomes[0].delivery, Delivery::Unconfirmed));
+    }
+
+    #[test]
+    fn failed_when_read_differs() {
+        let mut gate = SwitchGate::default();
+        let mut fake = Fake { fail_set: false, read: ReadMode::Mismatch, sets: Vec::new() };
+        let outcomes = gate.run(&mut fake, &ready(), Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap();
+        match &outcomes[0].delivery {
+            Delivery::Failed { reason } => assert!(reason.contains("보낸 번호")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_failure_does_not_read_or_roll_back() {
+        let mut gate = SwitchGate::default();
+        let mut fake = Fake { fail_set: true, read: ReadMode::Match, sets: Vec::new() };
+        let outcomes = gate.run(&mut fake, &ready(), Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap();
+        assert!(matches!(outcomes[0].delivery, Delivery::Delivered));
+        assert!(matches!(outcomes[1].delivery, Delivery::Failed { .. }));
+        assert_eq!(fake.sets.len(), 2);
+    }
+
+    #[test]
+    fn second_switch_while_busy_is_rejected() {
+        let mut gate = SwitchGate::default();
+        gate.busy = true;
+        let mut fake = Fake { fail_set: false, read: ReadMode::Match, sets: Vec::new() };
+        let err = gate.run(&mut fake, &ready(), Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap_err();
+        assert!(matches!(err, PlanError::Busy));
+        assert!(fake.sets.is_empty());
+    }
+
+    #[test]
+    fn trial_does_not_require_full_configuration() {
+        let mut gate = SwitchGate::default();
+        let mut fake = Fake { fail_set: false, read: ReadMode::Match, sets: Vec::new() };
+        let outcome = gate.trial(&mut fake, "mon-1", 17).unwrap();
+        assert_eq!(outcome.role, 0);
+        assert!(matches!(outcome.delivery, Delivery::Delivered));
     }
 }
