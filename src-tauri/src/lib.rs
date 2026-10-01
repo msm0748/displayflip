@@ -1,5 +1,11 @@
+mod control;
 mod domain;
+mod identity;
 mod settings;
+#[cfg(windows)]
+mod windows_monitor;
+#[cfg(target_os = "macos")]
+mod macos_monitor;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
