@@ -9,7 +9,10 @@ mod macos_monitor;
 
 use std::path::{Path, PathBuf};
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 
 const SETTINGS_DIR_UNAVAILABLE: &str = "설정 디렉터리를 만들지 못했습니다.";
 
@@ -17,6 +20,7 @@ struct AppState {
     settings_path: Option<PathBuf>,
     gate: std::sync::Mutex<domain::SwitchGate>,
     shortcut_error: std::sync::Mutex<Option<String>>,
+    registered_shortcuts: std::sync::Mutex<Vec<Shortcut>>,
 }
 
 fn require_settings_path(path: &Option<PathBuf>) -> Result<&Path, String> {
@@ -38,9 +42,25 @@ fn get_settings(state: tauri::State<AppState>) -> Result<domain::Settings, Strin
 }
 
 #[tauri::command]
-fn save_settings(state: tauri::State<AppState>, settings: domain::Settings) -> Result<(), String> {
+fn save_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    settings: domain::Settings,
+) -> Result<(), String> {
     let path = require_settings_path(&state.settings_path)?;
-    settings::save_settings(path, &settings)
+    settings::save_settings(path, &settings)?;
+    record_shortcut_registration(&state, replace_registered_shortcuts(&app, &settings.hotkeys));
+    if settings.launch_at_login {
+        if let Err(error) = app.autolaunch().enable() {
+            let mut rewritten = settings;
+            rewritten.launch_at_login = false;
+            let _ = settings::save_settings(path, &rewritten);
+            return Err(format!("로그인 자동 실행을 등록하지 못했습니다: {error}"));
+        }
+    } else {
+        app.autolaunch().disable().map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -75,17 +95,259 @@ fn shortcut_status(state: tauri::State<AppState>) -> Option<String> {
     state.shortcut_error.lock().ok().and_then(|error| error.clone())
 }
 
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SwitchFinished {
+    outcomes: Option<Vec<domain::MonitorOutcome>>,
+    error: Option<String>,
+}
+
+fn perform_switch(app: &tauri::AppHandle, destination: domain::Destination) {
+    let state = app.state::<AppState>();
+    let result = (|| {
+        let mut gate = state
+            .gate
+            .try_lock()
+            .map_err(|_| domain::PlanError::Busy.to_string())?;
+        let path = require_settings_path(&state.settings_path)?;
+        let settings = settings::load_settings(path)?;
+        let mut control = control::open_control();
+        let connected = control
+            .list_monitors()?
+            .into_iter()
+            .map(|monitor| monitor.id)
+            .collect::<Vec<_>>();
+        gate.run(&mut *control, &settings, destination, &connected)
+            .map_err(|err| err.to_string())
+    })();
+    let window = app.get_webview_window("main");
+    let visible = window
+        .as_ref()
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    if visible {
+        let payload = match result {
+            Ok(outcomes) => SwitchFinished {
+                outcomes: Some(outcomes),
+                error: None,
+            },
+            Err(message) => SwitchFinished {
+                outcomes: None,
+                error: Some(message),
+            },
+        };
+        let _ = app.emit("switch-finished", payload);
+        return;
+    }
+    let body = match &result {
+        Ok(outcomes) => outcomes.iter().map(outcome_line).collect::<Vec<_>>().join("\n"),
+        Err(message) => message.clone(),
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .title("DisplayFlip")
+        .body(body)
+        .show();
+}
+
+fn outcome_line(outcome: &domain::MonitorOutcome) -> String {
+    let delivery = match &outcome.delivery {
+        domain::Delivery::Delivered => "전달됨".to_string(),
+        domain::Delivery::Unconfirmed => "전달됐으나 확인 불가".to_string(),
+        domain::Delivery::Failed { reason } => format!("실패: {reason}"),
+    };
+    format!(
+        "모니터 {}: {delivery}",
+        if outcome.role == 0 {
+            outcome.monitor_id.clone()
+        } else {
+            outcome.role.to_string()
+        }
+    )
+}
+
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn parse_shortcut(value: &str) -> Result<Shortcut, String> {
+    let mut modifiers = Modifiers::empty();
+    let mut key = None;
+    for part in value.split('+') {
+        match part {
+            "Ctrl" => modifiers |= Modifiers::CONTROL,
+            "Alt" => modifiers |= Modifiers::ALT,
+            "Shift" => modifiers |= Modifiers::SHIFT,
+            "Super" => modifiers |= Modifiers::SUPER,
+            "A" => key = Some(Code::KeyA),
+            "B" => key = Some(Code::KeyB),
+            "C" => key = Some(Code::KeyC),
+            "D" => key = Some(Code::KeyD),
+            "E" => key = Some(Code::KeyE),
+            "F" => key = Some(Code::KeyF),
+            "G" => key = Some(Code::KeyG),
+            "H" => key = Some(Code::KeyH),
+            "I" => key = Some(Code::KeyI),
+            "J" => key = Some(Code::KeyJ),
+            "K" => key = Some(Code::KeyK),
+            "L" => key = Some(Code::KeyL),
+            "M" => key = Some(Code::KeyM),
+            "N" => key = Some(Code::KeyN),
+            "O" => key = Some(Code::KeyO),
+            "P" => key = Some(Code::KeyP),
+            "Q" => key = Some(Code::KeyQ),
+            "R" => key = Some(Code::KeyR),
+            "S" => key = Some(Code::KeyS),
+            "T" => key = Some(Code::KeyT),
+            "U" => key = Some(Code::KeyU),
+            "V" => key = Some(Code::KeyV),
+            "W" => key = Some(Code::KeyW),
+            "X" => key = Some(Code::KeyX),
+            "Y" => key = Some(Code::KeyY),
+            "Z" => key = Some(Code::KeyZ),
+            "0" => key = Some(Code::Digit0),
+            "1" => key = Some(Code::Digit1),
+            "2" => key = Some(Code::Digit2),
+            "3" => key = Some(Code::Digit3),
+            "4" => key = Some(Code::Digit4),
+            "5" => key = Some(Code::Digit5),
+            "6" => key = Some(Code::Digit6),
+            "7" => key = Some(Code::Digit7),
+            "8" => key = Some(Code::Digit8),
+            "9" => key = Some(Code::Digit9),
+            _ => return Err(format!("단축키를 해석할 수 없습니다: {value}")),
+        }
+    }
+    let key = key.ok_or_else(|| format!("단축키를 해석할 수 없습니다: {value}"))?;
+    Ok(Shortcut::new(Some(modifiers), key))
+}
+
+fn remember_shortcuts(state: &AppState, shortcuts: Vec<Shortcut>) {
+    if let Ok(mut slot) = state.registered_shortcuts.lock() {
+        *slot = shortcuts;
+    }
+}
+
+fn replace_registered_shortcuts(app: &tauri::AppHandle, hotkeys: &domain::Hotkeys) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let previous = state
+        .registered_shortcuts
+        .lock()
+        .map(|shortcuts| shortcuts.clone())
+        .unwrap_or_default();
+    let mut kept = previous.clone();
+    for shortcut in previous {
+        app.global_shortcut()
+            .unregister(shortcut)
+            .map_err(|err| err.to_string())?;
+        kept.retain(|registered| registered != &shortcut);
+        remember_shortcuts(&state, kept.clone());
+    }
+
+    let mut registered = Vec::new();
+    for (value, destination) in [
+        (hotkeys.to_mac.as_str(), domain::Destination::Mac),
+        (hotkeys.to_windows.as_str(), domain::Destination::Windows),
+    ] {
+        let shortcut = parse_shortcut(value)?;
+        app.global_shortcut()
+            .on_shortcut(shortcut, move |app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    perform_switch(app, destination);
+                }
+            })
+            .map_err(|err| err.to_string())?;
+        registered.push(shortcut);
+        remember_shortcuts(&state, registered.clone());
+    }
+    Ok(())
+}
+
+fn record_shortcut_registration(state: &AppState, result: Result<(), String>) {
+    let message = result
+        .err()
+        .map(|error| format!("단축키를 등록하지 못했습니다: {error}"));
+    if let Ok(mut slot) = state.shortcut_error.lock() {
+        *slot = message;
+    }
+}
+
+fn install_tray(app: &tauri::App) -> tauri::Result<()> {
+    let to_mac = tauri::menu::MenuItem::with_id(app, "to-mac", "맥으로", true, None::<&str>)?;
+    let to_windows = tauri::menu::MenuItem::with_id(app, "to-windows", "Windows로", true, None::<&str>)?;
+    let open = tauri::menu::MenuItem::with_id(app, "open", "열기", true, None::<&str>)?;
+    let quit = tauri::menu::MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
+    let menu = tauri::menu::Menu::with_items(app, &[&to_mac, &to_windows, &open, &quit])?;
+    let icon = app.default_window_icon().cloned();
+    let mut tray = tauri::tray::TrayIconBuilder::new()
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "to-mac" => perform_switch(app, domain::Destination::Mac),
+            "to-windows" => perform_switch(app, domain::Destination::Windows),
+            "open" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = icon {
+        tray = tray.icon(icon);
+    }
+    let _ = tray.build(app);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let (settings_path, configured) = startup_settings(app);
             app.manage(AppState {
-                settings_path,
+                settings_path: settings_path.clone(),
                 gate: std::sync::Mutex::new(domain::SwitchGate::default()),
                 shortcut_error: std::sync::Mutex::new(None),
+                registered_shortcuts: std::sync::Mutex::new(Vec::new()),
             });
+            if let Some(path) = &settings_path {
+                if let Ok(settings) = settings::load_settings(path) {
+                    if settings.launch_at_login && app.autolaunch().enable().is_err() {
+                        let mut rewritten = settings.clone();
+                        rewritten.launch_at_login = false;
+                        let _ = settings::save_settings(path, &rewritten);
+                    }
+                    record_shortcut_registration(
+                        app.state::<AppState>().inner(),
+                        replace_registered_shortcuts(app.handle(), &settings.hotkeys),
+                    );
+                }
+            }
+            install_tray(app)?;
             let autostart = std::env::args().any(|arg| arg == "--autostart");
             if domain::should_show_window(autostart, configured) {
                 if let Some(window) = app.get_webview_window("main") {
@@ -146,5 +408,12 @@ mod tests {
     fn require_settings_path_rejects_missing_directory() {
         let err = require_settings_path(&None).unwrap_err();
         assert_eq!(err, SETTINGS_DIR_UNAVAILABLE);
+    }
+
+    #[test]
+    fn default_shortcuts_parse() {
+        assert!(parse_shortcut("Ctrl+Alt+M").is_ok());
+        assert!(parse_shortcut("Ctrl+Alt+W").is_ok());
+        assert!(parse_shortcut("Nope").unwrap_err().contains("단축키를 해석할 수 없습니다"));
     }
 }
