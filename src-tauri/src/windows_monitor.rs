@@ -16,9 +16,10 @@ use windows::Win32::System::Registry::{
 use windows::core::{BOOL, PCWSTR};
 
 use crate::domain::{DetectedMonitor, MonitorControl};
-use crate::identity::edid_stable_id;
+use crate::identity::{display_interface_parts, edid_stable_id};
 
 const INPUT_SELECT: u8 = 0x60;
+const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 0x1;
 
 struct OpenMonitor {
     handle: HANDLE,
@@ -37,8 +38,7 @@ impl WindowsControl {
     pub fn open() -> Self {
         let mut monitors = HashMap::new();
         for found in enumerate_handles() {
-            let id = found.device_id.clone();
-            monitors.insert(id, OpenMonitor { handle: found.handle, name: found.name });
+            remember(&mut monitors, found);
         }
         Self { monitors }
     }
@@ -103,6 +103,18 @@ struct Found {
     handle: HANDLE,
     name: String,
     device_id: String,
+    instance: String,
+}
+
+fn remember(monitors: &mut HashMap<String, OpenMonitor>, found: Found) {
+    let id = if monitors.contains_key(&found.device_id) {
+        let id = &found.device_id;
+        let instance = &found.instance;
+        format!("{id}#{instance}")
+    } else {
+        found.device_id
+    };
+    monitors.insert(id, OpenMonitor { handle: found.handle, name: found.name });
 }
 
 fn enumerate_handles() -> Vec<Found> {
@@ -128,18 +140,27 @@ fn open_physical(monitor: HMONITOR) -> Option<Found> {
     }
     let mut physical = vec![PHYSICAL_MONITOR::default(); count as usize];
     unsafe { GetPhysicalMonitorsFromHMONITOR(monitor, &mut physical).ok()? };
+    let Some(device_name) = monitor_device_name(monitor) else {
+        unsafe { let _ = DestroyPhysicalMonitors(&physical); }
+        return None;
+    };
     let first = physical[0];
     if physical.len() > 1 {
         unsafe { let _ = DestroyPhysicalMonitors(&physical[1..]); }
     }
-    let device_name = monitor_device_name(monitor)?;
-    let device_id = display_device_id(&device_name).unwrap_or(device_name);
-    let stable = read_edid(&device_id).and_then(|bytes| edid_stable_id(&bytes)).unwrap_or(device_id);
+    let interface_name = display_interface_name(&device_name).unwrap_or(device_name);
+    let parts = display_interface_parts(&interface_name);
+    let instance = parts.as_ref().map(|(_, instance)| instance.clone()).unwrap_or_default();
+    let stable = parts
+        .and_then(|(hwid, instance)| read_edid(&hwid, &instance))
+        .and_then(|bytes| edid_stable_id(&bytes))
+        .unwrap_or(interface_name);
     let description = first.szPhysicalMonitorDescription;
     Some(Found {
         handle: first.hPhysicalMonitor,
         name: utf16_to_string(&description),
         device_id: stable,
+        instance,
     })
 }
 
@@ -150,16 +171,15 @@ fn monitor_device_name(monitor: HMONITOR) -> Option<String> {
     if ok.as_bool() { Some(utf16_to_string(&info.szDevice)) } else { None }
 }
 
-fn display_device_id(device_name: &str) -> Option<String> {
+fn display_interface_name(device_name: &str) -> Option<String> {
     let mut device = DISPLAY_DEVICEW::default();
     device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
     let name = wide(device_name);
-    let ok = unsafe { EnumDisplayDevicesW(PCWSTR(name.as_ptr()), 0, &mut device, 0) };
+    let ok = unsafe { EnumDisplayDevicesW(PCWSTR(name.as_ptr()), 0, &mut device, EDD_GET_DEVICE_INTERFACE_NAME) };
     if ok.as_bool() { Some(utf16_to_string(&device.DeviceID)) } else { None }
 }
 
-fn read_edid(device_id: &str) -> Option<Vec<u8>> {
-    let (hwid, instance) = device_id.split('\\').nth(1).zip(device_id.split('\\').nth(3))?;
+fn read_edid(hwid: &str, instance: &str) -> Option<Vec<u8>> {
     let path = format!("SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\{hwid}\\{instance}\\Device Parameters");
     let wide_path = wide(&path);
     let mut key = HKEY::default();
@@ -209,4 +229,33 @@ fn utf16_to_string(buf: &[u16]) -> String {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::c_void;
+
+    use super::*;
+
+    fn found(id: &str, instance: &str, handle: usize) -> Found {
+        Found {
+            handle: HANDLE(handle as *mut c_void),
+            name: id.to_string(),
+            device_id: id.to_string(),
+            instance: instance.to_string(),
+        }
+    }
+
+    #[test]
+    fn duplicate_edid_id_keeps_both_handles() {
+        let mut monitors = HashMap::new();
+        remember(&mut monitors, found("ABC1234-42", "5&2a3b4c&0&UID4352", 1));
+        remember(&mut monitors, found("ABC1234-42", "5&9ff001&0&UID4353", 2));
+        assert_eq!(monitors.len(), 2);
+        assert_eq!(monitors.get("ABC1234-42").unwrap().handle, HANDLE(1 as *mut c_void));
+        assert_eq!(
+            monitors.get("ABC1234-42#5&9ff001&0&UID4353").unwrap().handle,
+            HANDLE(2 as *mut c_void)
+        );
+    }
 }

@@ -24,6 +24,31 @@ fn letter(value: u16) -> Option<u8> {
     }
 }
 
+pub fn display_interface_parts(name: &str) -> Option<(String, String)> {
+    let rest = name.strip_prefix(r"\\?\DISPLAY#")?;
+    let mut parts = rest.split('#');
+    let hwid = parts.next()?;
+    let instance = parts.next()?;
+    let class_guid = parts.next()?;
+    if parts.next().is_some()
+        || hwid.is_empty()
+        || instance.is_empty()
+        || hwid.contains('\\')
+        || instance.contains('\\')
+        || !is_class_guid(class_guid)
+    {
+        return None;
+    }
+    Some((hwid.to_string(), instance.to_string()))
+}
+
+fn is_class_guid(value: &str) -> bool {
+    let Some(inner) = value.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')) else {
+        return false;
+    };
+    !inner.is_empty() && !inner.contains('{') && !inner.contains('}')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +76,39 @@ mod tests {
     #[test]
     fn short_edid_has_no_id() {
         assert_eq!(edid_stable_id(&[0, 1, 2]), None);
+    }
+
+    #[test]
+    fn display_interface_parts_reads_hwid_and_enum_instance() {
+        let fixtures = [
+            (
+                r"\\?\DISPLAY#GSM5B09#5&2a3b4c&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}",
+                "GSM5B09",
+                "5&2a3b4c&0&UID4352",
+            ),
+            (
+                r"\\?\DISPLAY#DELA007#5&2f8c3d4&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}",
+                "DELA007",
+                "5&2f8c3d4&0&UID4352",
+            ),
+        ];
+        for (name, hwid, instance) in fixtures {
+            assert_eq!(display_interface_parts(name), Some((hwid.to_string(), instance.to_string())));
+        }
+    }
+
+    #[test]
+    fn display_interface_parts_rejects_driver_index_device_id() {
+        assert_eq!(
+            display_interface_parts(r"MONITOR\GSM5B09\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001"),
+            None
+        );
+    }
+
+    #[test]
+    fn display_interface_parts_rejects_incomplete_name() {
+        assert_eq!(display_interface_parts(r"\\?\DISPLAY#GSM5B09#5&2a3b4c&0&UID4352"), None);
+        assert_eq!(display_interface_parts(r"\\?\DISPLAY#GSM5B09"), None);
+        assert_eq!(display_interface_parts(""), None);
     }
 }
