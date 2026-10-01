@@ -14,3 +14,7 @@ main {
   gap: 8px;
   align-items: center;
 }
+
+.notice {
+  white-space: pre-line;
+}

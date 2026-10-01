@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
 type Destination = "mac" | "windows";
+type MonitorIndex = "1" | "2";
 
 interface MonitorRole {
   id: string;
@@ -27,6 +28,8 @@ interface Outcome {
   delivery: { status: "delivered" } | { status: "unconfirmed" } | { status: "failed"; reason: string };
 }
 
+const CODE_RANGE_NOTICE = "입력 번호는 0부터 255까지의 정수여야 합니다.";
+
 function outcomeText(outcome: Outcome): string {
   const delivery = outcome.delivery;
   if (delivery.status === "delivered") return "전달됨";
@@ -34,14 +37,28 @@ function outcomeText(outcome: Outcome): string {
   return `실패: ${delivery.reason}`;
 }
 
+function parseCode(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d{1,3}$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  if (value > 255) return null;
+  return value;
+}
+
+function savedCode(value: number | null): string {
+  return value === null ? "없음" : String(value);
+}
+
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [monitors, setMonitors] = useState<DetectedMonitor[]>([]);
   const [notice, setNotice] = useState("");
-  const [code, setCode] = useState(17);
+  const [codes, setCodes] = useState<Record<MonitorIndex, string>>({ "1": "", "2": "" });
 
   useEffect(() => {
-    void invoke<Settings>("get_settings").then(setSettings);
+    void invoke<Settings>("get_settings").then(setSettings).catch((error: unknown) => {
+      setNotice(String(error));
+    });
     void invoke<DetectedMonitor[]>("list_monitors").then(setMonitors).catch((error: unknown) => {
       setNotice(String(error));
     });
@@ -57,7 +74,14 @@ function App() {
     };
   }, []);
 
-  if (!settings) return <main>설정을 불러오는 중입니다.</main>;
+  if (!settings) {
+    return (
+      <main>
+        {notice ? <p className="notice">{notice}</p> : null}
+        설정을 불러오는 중입니다.
+      </main>
+    );
+  }
 
   async function switchTo(destination: Destination) {
     try {
@@ -68,28 +92,55 @@ function App() {
     }
   }
 
-  function role(index: "1" | "2"): MonitorRole {
+  function role(index: MonitorIndex): MonitorRole {
     return settings!.monitors[index] ?? { id: "", hdmiCode: null, dpCode: null };
   }
 
-  async function assign(index: "1" | "2", id: string) {
-    const next = { ...settings!, monitors: { ...settings!.monitors, [index]: { ...role(index), id } } };
-    await invoke("save_settings", { settings: next });
-    setSettings(next);
+  function draftCode(index: MonitorIndex): number | null {
+    const value = parseCode(codes[index]);
+    if (value === null) setNotice(CODE_RANGE_NOTICE);
+    return value;
   }
 
-  async function saveCode(index: "1" | "2", field: "hdmiCode" | "dpCode") {
+  async function assign(index: MonitorIndex, id: string) {
+    const next = { ...settings!, monitors: { ...settings!.monitors, [index]: { ...role(index), id } } };
+    try {
+      await invoke("save_settings", { settings: next });
+      setSettings(next);
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
+  async function saveCode(index: MonitorIndex, field: "hdmiCode" | "dpCode") {
+    const value = draftCode(index);
+    if (value === null) return;
     const next = {
       ...settings!,
-      monitors: { ...settings!.monitors, [index]: { ...role(index), [field]: code } },
+      monitors: { ...settings!.monitors, [index]: { ...role(index), [field]: value } },
     };
-    await invoke("save_settings", { settings: next });
-    setSettings(next);
+    try {
+      await invoke("save_settings", { settings: next });
+      setSettings(next);
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
+  async function trial(index: MonitorIndex) {
+    const value = draftCode(index);
+    if (value === null) return;
+    try {
+      const outcome = await invoke<Outcome>("trial_set_input", { id: role(index).id, code: value });
+      setNotice(outcomeText(outcome));
+    } catch (error) {
+      setNotice(String(error));
+    }
   }
 
   return (
     <main>
-      <p>{notice}</p>
+      <p className="notice">{notice}</p>
       <div className="row">
         <button type="button" onClick={() => void switchTo("mac")}>맥으로</button>
         <button type="button" onClick={() => void switchTo("windows")}>Windows로</button>
@@ -105,9 +156,16 @@ function App() {
               ))}
             </select>
           </label>
+          <p>HDMI {savedCode(role(index).hdmiCode)} DP {savedCode(role(index).dpCode)}</p>
           <div className="row">
-            <input type="number" min={0} max={255} value={code} onChange={(event) => setCode(Number(event.target.value))} />
-            <button type="button" onClick={() => void invoke("trial_set_input", { id: role(index).id, code }).then((outcome) => setNotice(outcomeText(outcome as Outcome))).catch((error: unknown) => setNotice(String(error)))}>이 번호로 시험</button>
+            <input
+              type="number"
+              min={0}
+              max={255}
+              value={codes[index]}
+              onChange={(event) => setCodes({ ...codes, [index]: event.target.value })}
+            />
+            <button type="button" onClick={() => void trial(index)}>이 번호로 시험</button>
             <button type="button" onClick={() => void saveCode(index, "hdmiCode")}>HDMI로 저장</button>
             <button type="button" onClick={() => void saveCode(index, "dpCode")}>DP로 저장</button>
             <button type="button" onClick={() => void invoke<number>("read_input", { id: role(index).id }).then((value) => setNotice(`현재 번호 ${value}`)).catch((error: unknown) => setNotice(String(error)))}>현재 번호 읽기</button>
