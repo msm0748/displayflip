@@ -132,10 +132,10 @@ pub fn plan_switch(
     }
     let first_code = code_for(&first, destination, 1, &mut missing);
     let second_code = code_for(&second, destination, 2, &mut missing);
-    if !connected_ids.iter().any(|id| id == &first.id) {
+    if !first.id.is_empty() && !connected_ids.iter().any(|id| id == &first.id) {
         missing.push(MissingItem::Monitor1Disconnected);
     }
-    if !connected_ids.iter().any(|id| id == &second.id) {
+    if !second.id.is_empty() && !connected_ids.iter().any(|id| id == &second.id) {
         missing.push(MissingItem::Monitor2Disconnected);
     }
     if !missing.is_empty() {
@@ -343,6 +343,17 @@ mod tests {
             plan_switch(&settings, Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap_err();
         assert!(matches!(err, PlanError::Incomplete { .. }));
         assert!(!matches!(err, PlanError::SameMonitor));
+        let PlanError::Incomplete { missing } = err else {
+            unreachable!()
+        };
+        assert_eq!(
+            missing,
+            vec![MissingItem::Monitor1, MissingItem::Monitor2]
+        );
+        let message = PlanError::Incomplete { missing: missing.clone() }.to_string();
+        assert!(message.contains("모니터 1"));
+        assert!(message.contains("모니터 2"));
+        assert!(!message.contains("연결"));
     }
 
     #[test]
