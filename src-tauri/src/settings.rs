@@ -36,29 +36,54 @@ pub fn save_settings(path: &Path, settings: &Settings) -> Result<(), String> {
     let temp_path = path.with_extension("json.tmp");
     std::fs::write(&temp_path, text).map_err(|err| err.to_string())?;
 
-    let bak_path = path.with_extension("json.bak");
-    let replace_result = if !path.exists() {
-        std::fs::rename(&temp_path, path).map_err(|err| err.to_string())
-    } else {
-        std::fs::rename(path, &bak_path).map_err(|err| err.to_string())?;
-        match std::fs::rename(&temp_path, path) {
-            Ok(()) => {
-                let _ = std::fs::remove_file(&bak_path);
-                Ok(())
-            }
-            Err(err) => {
-                std::fs::rename(&bak_path, path).map_err(|restore| {
-                    format!("{}; failed to restore backup: {}", err, restore)
-                })?;
-                Err(err.to_string())
-            }
+    match replace_settings_file(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(err)
         }
-    };
-
-    if replace_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
     }
-    replace_result
+}
+
+#[cfg(windows)]
+fn replace_settings_file(temp_path: &Path, dest_path: &Path) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            lpExistingFileName: *const u16,
+            lpNewFileName: *const u16,
+            dwFlags: u32,
+        ) -> i32;
+    }
+
+    fn to_wide(path: &Path) -> Vec<u16> {
+        OsStr::new(path).encode_wide().chain(Some(0)).collect()
+    }
+
+    let from = to_wide(temp_path);
+    let to = to_wide(dest_path);
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_settings_file(temp_path: &Path, dest_path: &Path) -> Result<(), String> {
+    std::fs::rename(temp_path, dest_path).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -93,6 +118,31 @@ mod tests {
         save_settings(&path, &settings).unwrap();
         assert_eq!(load_settings(&path).unwrap(), settings);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_succeeds_with_preexisting_bak_file() {
+        let path = std::env::temp_dir().join(format!(
+            "displayflip-bak-{}-settings.json",
+            std::process::id()
+        ));
+        let bak_path = path.with_extension("json.bak");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak_path);
+        std::fs::write(&bak_path, b"junk leftover backup").unwrap();
+
+        let mut settings = default_settings();
+        settings.hotkeys.to_mac = "Ctrl+Alt+Bak1".into();
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), settings);
+
+        settings.hotkeys.to_mac = "Ctrl+Alt+Bak2".into();
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), settings);
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak_path);
     }
 
     #[test]
