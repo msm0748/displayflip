@@ -123,11 +123,13 @@ pub fn plan_switch(
     let Some(second) = settings.monitors.monitor2.clone() else {
         return Err(PlanError::Incomplete { missing: vec![MissingItem::Monitor2] });
     };
-    if first.id == second.id {
-        return Err(PlanError::SameMonitor);
-    }
-
     let mut missing = Vec::new();
+    if first.id.is_empty() {
+        missing.push(MissingItem::Monitor1);
+    }
+    if second.id.is_empty() {
+        missing.push(MissingItem::Monitor2);
+    }
     let first_code = code_for(&first, destination, 1, &mut missing);
     let second_code = code_for(&second, destination, 2, &mut missing);
     if !connected_ids.iter().any(|id| id == &first.id) {
@@ -138,6 +140,9 @@ pub fn plan_switch(
     }
     if !missing.is_empty() {
         return Err(PlanError::Incomplete { missing });
+    }
+    if first.id == second.id {
+        return Err(PlanError::SameMonitor);
     }
 
     Ok(vec![
@@ -327,6 +332,17 @@ mod tests {
         settings.monitors.monitor2.as_mut().unwrap().id = "mon-1".into();
         let err = plan_switch(&settings, Destination::Mac, &["mon-1".into()]).unwrap_err();
         assert!(matches!(err, PlanError::SameMonitor));
+    }
+
+    #[test]
+    fn empty_role_ids_are_incomplete_not_same_monitor() {
+        let mut settings = ready();
+        settings.monitors.monitor1.as_mut().unwrap().id.clear();
+        settings.monitors.monitor2.as_mut().unwrap().id.clear();
+        let err =
+            plan_switch(&settings, Destination::Mac, &["mon-1".into(), "mon-2".into()]).unwrap_err();
+        assert!(matches!(err, PlanError::Incomplete { .. }));
+        assert!(!matches!(err, PlanError::SameMonitor));
     }
 
     #[test]
