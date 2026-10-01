@@ -23,7 +23,7 @@ pub fn load_settings(path: &Path) -> Result<Settings, String> {
 
 pub fn save_settings(path: &Path, settings: &Settings) -> Result<(), String> {
     if let (Some(first), Some(second)) = (&settings.monitors.monitor1, &settings.monitors.monitor2) {
-        if first.id == second.id {
+        if !first.id.is_empty() && !second.id.is_empty() && first.id == second.id {
             return Err(PlanError::SameMonitor.to_string());
         }
     }
@@ -155,5 +155,21 @@ mod tests {
         let err = save_settings(&path, &settings).unwrap_err();
         assert!(err.contains("서로 다른 모니터"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_accepts_empty_monitor_ids() {
+        let path = std::env::temp_dir().join(format!("displayflip-empty-{}-settings.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut settings = default_settings();
+        settings.monitors.monitor1 = Some(MonitorRoleConfig { id: String::new(), hdmi_code: None, dp_code: None });
+        settings.monitors.monitor2 = Some(MonitorRoleConfig { id: String::new(), hdmi_code: None, dp_code: None });
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), settings);
+
+        settings.monitors.monitor2 = Some(MonitorRoleConfig { id: "BBB".into(), hdmi_code: None, dp_code: None });
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), settings);
+        let _ = std::fs::remove_file(&path);
     }
 }

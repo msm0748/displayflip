@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Destination = "mac" | "windows";
 type MonitorIndex = "1" | "2";
@@ -29,6 +29,15 @@ interface Outcome {
 }
 
 const CODE_RANGE_NOTICE = "입력 번호는 0부터 255까지의 정수여야 합니다.";
+const SAVED_NOTICE = "설정을 저장했습니다.";
+
+function roleFrom(settings: Settings, index: MonitorIndex): MonitorRole {
+  return settings.monitors[index] ?? { id: "", hdmiCode: null, dpCode: null };
+}
+
+function withLatestForm(saved: Settings, live: Settings): Settings {
+  return { ...saved, hotkeys: live.hotkeys, launchAtLogin: live.launchAtLogin };
+}
 
 function outcomeText(outcome: Outcome): string {
   const delivery = outcome.delivery;
@@ -54,6 +63,29 @@ function App() {
   const [monitors, setMonitors] = useState<DetectedMonitor[]>([]);
   const [notice, setNotice] = useState("");
   const [codes, setCodes] = useState<Record<MonitorIndex, string>>({ "1": "", "2": "" });
+  const settingsRef = useRef<Settings | null>(null);
+  const saveQueue = useRef<Promise<Settings | null>>(Promise.resolve(null));
+  settingsRef.current = settings;
+
+  function enqueueSave(apply: (current: Settings) => Settings) {
+    const task = saveQueue.current.then(async (committed) => {
+      const live = settingsRef.current;
+      if (!live) return committed;
+      try {
+        const base = committed ? withLatestForm(committed, live) : live;
+        const next = apply(base);
+        await invoke("save_settings", { settings: next });
+        setSettings(next);
+        setNotice(SAVED_NOTICE);
+        return next;
+      } catch (error) {
+        setNotice(String(error));
+        return committed;
+      }
+    });
+    saveQueue.current = task;
+    return task;
+  }
 
   useEffect(() => {
     void invoke<Settings>("get_settings").then(setSettings).catch((error: unknown) => {
@@ -93,7 +125,7 @@ function App() {
   }
 
   function role(index: MonitorIndex): MonitorRole {
-    return settings!.monitors[index] ?? { id: "", hdmiCode: null, dpCode: null };
+    return roleFrom(settings!, index);
   }
 
   function draftCode(index: MonitorIndex): number | null {
@@ -102,29 +134,24 @@ function App() {
     return value;
   }
 
-  async function assign(index: MonitorIndex, id: string) {
-    const next = { ...settings!, monitors: { ...settings!.monitors, [index]: { ...role(index), id } } };
-    try {
-      await invoke("save_settings", { settings: next });
-      setSettings(next);
-    } catch (error) {
-      setNotice(String(error));
-    }
+  function assign(index: MonitorIndex, id: string) {
+    return enqueueSave((current) => ({
+      ...current,
+      monitors: { ...current.monitors, [index]: { ...roleFrom(current, index), id } },
+    }));
   }
 
-  async function saveCode(index: MonitorIndex, field: "hdmiCode" | "dpCode") {
+  function saveCode(index: MonitorIndex, field: "hdmiCode" | "dpCode") {
     const value = draftCode(index);
-    if (value === null) return;
-    const next = {
-      ...settings!,
-      monitors: { ...settings!.monitors, [index]: { ...role(index), [field]: value } },
-    };
-    try {
-      await invoke("save_settings", { settings: next });
-      setSettings(next);
-    } catch (error) {
-      setNotice(String(error));
-    }
+    if (value === null) return Promise.resolve(null);
+    return enqueueSave((current) => ({
+      ...current,
+      monitors: { ...current.monitors, [index]: { ...roleFrom(current, index), [field]: value } },
+    }));
+  }
+
+  function saveDisplayedSettings() {
+    return enqueueSave((current) => withLatestForm(current, settingsRef.current ?? current));
   }
 
   async function trial(index: MonitorIndex) {
@@ -184,7 +211,7 @@ function App() {
         <input type="checkbox" checked={settings.launchAtLogin} onChange={(event) => setSettings({ ...settings, launchAtLogin: event.target.checked })} />
         로그인 시 실행
       </label>
-      <button type="button" onClick={() => void invoke("save_settings", { settings }).then(() => setNotice("설정을 저장했습니다.")).catch((error: unknown) => setNotice(String(error)))}>설정 저장</button>
+      <button type="button" onClick={() => void saveDisplayedSettings()}>설정 저장</button>
     </main>
   );
 }
