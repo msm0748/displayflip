@@ -92,6 +92,10 @@ impl std::fmt::Display for PlanError {
     }
 }
 
+pub fn should_show_window(autostart: bool, configured: bool) -> bool {
+    !(autostart && configured)
+}
+
 pub fn is_configured(settings: &Settings) -> bool {
     let Some(first) = &settings.monitors.monitor1 else {
         return false;
@@ -203,7 +207,7 @@ pub struct SwitchGate {
 }
 
 impl SwitchGate {
-    pub fn run<C: MonitorControl>(
+    pub fn run<C: MonitorControl + ?Sized>(
         &mut self,
         control: &mut C,
         settings: &Settings,
@@ -224,7 +228,7 @@ impl SwitchGate {
         Ok(outcomes)
     }
 
-    pub fn trial<C: MonitorControl>(
+    pub fn trial<C: MonitorControl + ?Sized>(
         &mut self,
         control: &mut C,
         id: &str,
@@ -249,7 +253,7 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
-fn execute<C: MonitorControl>(control: &mut C, role: u8, id: &str, code: u8) -> MonitorOutcome {
+fn execute<C: MonitorControl + ?Sized>(control: &mut C, role: u8, id: &str, code: u8) -> MonitorOutcome {
     let delivery = match control.set_input(id, code) {
         Err(reason) => Delivery::Failed { reason },
         Ok(()) => match control.get_input(id) {
@@ -430,5 +434,12 @@ mod tests {
         let outcome = gate.trial(&mut fake, "mon-1", 17).unwrap();
         assert_eq!(outcome.role, 0);
         assert!(matches!(outcome.delivery, Delivery::Delivered));
+    }
+
+    #[test]
+    fn autostart_with_complete_settings_stays_hidden() {
+        assert!(!should_show_window(true, true));
+        assert!(should_show_window(true, false));
+        assert!(should_show_window(false, true));
     }
 }
