@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use windows::Win32::Devices::Display::{
@@ -37,9 +38,7 @@ unsafe impl Send for WindowsControl {}
 impl WindowsControl {
     pub fn open() -> Self {
         let mut monitors = HashMap::new();
-        for found in enumerate_handles() {
-            remember(&mut monitors, found);
-        }
+        remember(&mut monitors, enumerate_handles());
         Self { monitors }
     }
 }
@@ -106,15 +105,45 @@ struct Found {
     instance: String,
 }
 
-fn remember(monitors: &mut HashMap<String, OpenMonitor>, found: Found) {
-    let id = if monitors.contains_key(&found.device_id) {
-        let id = &found.device_id;
-        let instance = &found.instance;
-        format!("{id}#{instance}")
-    } else {
-        found.device_id
-    };
-    monitors.insert(id, OpenMonitor { handle: found.handle, name: found.name });
+fn remember(monitors: &mut HashMap<String, OpenMonitor>, found: Vec<Found>) {
+    let mut grouped: HashMap<String, Vec<Found>> = HashMap::new();
+    for item in found {
+        grouped.entry(item.device_id.clone()).or_default().push(item);
+    }
+    for (device_id, group) in grouped {
+        if group.len() == 1 {
+            let item = group.into_iter().next().unwrap();
+            keep_or_release(monitors, device_id, item);
+        } else {
+            for item in group {
+                let id = format!("{device_id}#{}", item.instance);
+                keep_or_release(monitors, id, item);
+            }
+        }
+    }
+}
+
+fn keep_or_release(monitors: &mut HashMap<String, OpenMonitor>, id: String, found: Found) {
+    match monitors.entry(id) {
+        Entry::Occupied(_) => release_unmapped(found.handle),
+        Entry::Vacant(slot) => {
+            slot.insert(OpenMonitor { handle: found.handle, name: found.name });
+        }
+    }
+}
+
+fn release_unmapped(handle: HANDLE) {
+    #[cfg(test)]
+    if tests::capture_unmapped(handle) {
+        return;
+    }
+    let physical = [PHYSICAL_MONITOR {
+        hPhysicalMonitor: handle,
+        szPhysicalMonitorDescription: [0; 128],
+    }];
+    unsafe {
+        let _ = DestroyPhysicalMonitors(&physical);
+    }
 }
 
 fn enumerate_handles() -> Vec<Found> {
@@ -233,9 +262,45 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::ffi::c_void;
 
     use super::*;
+
+    thread_local! {
+        static CAPTURED_UNMAPPED: RefCell<Option<Vec<HANDLE>>> = RefCell::new(None);
+    }
+
+    pub(super) fn capture_unmapped(handle: HANDLE) -> bool {
+        CAPTURED_UNMAPPED.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if let Some(captured) = slot.as_mut() {
+                captured.push(handle);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    struct CaptureGuard;
+
+    impl CaptureGuard {
+        fn arm() -> Self {
+            CAPTURED_UNMAPPED.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            Self
+        }
+
+        fn handles(&self) -> Vec<HANDLE> {
+            CAPTURED_UNMAPPED.with(|slot| slot.borrow().clone().unwrap_or_default())
+        }
+    }
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            CAPTURED_UNMAPPED.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
 
     fn found(id: &str, instance: &str, handle: usize) -> Found {
         Found {
@@ -246,16 +311,78 @@ mod tests {
         }
     }
 
+    fn id_set(monitors: &HashMap<String, OpenMonitor>) -> Vec<String> {
+        let mut ids: Vec<_> = monitors.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     #[test]
     fn duplicate_edid_id_keeps_both_handles() {
+        let first = "5&2a3b4c&0&UID4352";
+        let second = "5&9ff001&0&UID4353";
         let mut monitors = HashMap::new();
-        remember(&mut monitors, found("ABC1234-42", "5&2a3b4c&0&UID4352", 1));
-        remember(&mut monitors, found("ABC1234-42", "5&9ff001&0&UID4353", 2));
-        assert_eq!(monitors.len(), 2);
-        assert_eq!(monitors.get("ABC1234-42").unwrap().handle, HANDLE(1 as *mut c_void));
+        remember(
+            &mut monitors,
+            vec![found("ABC1234-42", first, 1), found("ABC1234-42", second, 2)],
+        );
         assert_eq!(
-            monitors.get("ABC1234-42#5&9ff001&0&UID4353").unwrap().handle,
-            HANDLE(2 as *mut c_void)
+            id_set(&monitors),
+            vec![
+                "ABC1234-42#5&2a3b4c&0&UID4352".to_string(),
+                "ABC1234-42#5&9ff001&0&UID4353".to_string(),
+            ]
+        );
+        assert_eq!(monitors.get("ABC1234-42#5&2a3b4c&0&UID4352").unwrap().handle, HANDLE(1 as *mut c_void));
+        assert_eq!(monitors.get("ABC1234-42#5&9ff001&0&UID4353").unwrap().handle, HANDLE(2 as *mut c_void));
+
+        let mut reversed = HashMap::new();
+        remember(
+            &mut reversed,
+            vec![found("ABC1234-42", second, 2), found("ABC1234-42", first, 1)],
+        );
+        assert_eq!(id_set(&monitors), id_set(&reversed));
+        assert_eq!(reversed.get("ABC1234-42#5&2a3b4c&0&UID4352").unwrap().handle, HANDLE(1 as *mut c_void));
+        assert_eq!(reversed.get("ABC1234-42#5&9ff001&0&UID4353").unwrap().handle, HANDLE(2 as *mut c_void));
+    }
+
+    #[test]
+    fn unique_edid_id_keeps_the_bare_id() {
+        let mut monitors = HashMap::new();
+        remember(&mut monitors, vec![found("ABC1234-42", "5&2a3b4c&0&UID4352", 1)]);
+        assert_eq!(monitors.len(), 1);
+        assert_eq!(monitors.get("ABC1234-42").unwrap().handle, HANDLE(1 as *mut c_void));
+    }
+
+    #[test]
+    fn occupied_qualified_id_releases_the_new_handle() {
+        let captured = CaptureGuard::arm();
+        let mut monitors = HashMap::new();
+        remember(
+            &mut monitors,
+            vec![
+                found("ABC1234-42", "same", 1),
+                found("ABC1234-42", "same", 2),
+                found("ABC1234-42", "other", 3),
+                found("ABC1234-42", "", 4),
+                found("ABC1234-42", "", 5),
+            ],
+        );
+        assert_eq!(
+            id_set(&monitors),
+            vec![
+                "ABC1234-42#".to_string(),
+                "ABC1234-42#other".to_string(),
+                "ABC1234-42#same".to_string(),
+            ]
+        );
+        assert_eq!(monitors.get("ABC1234-42#same").unwrap().handle, HANDLE(1 as *mut c_void));
+        assert_eq!(monitors.get("ABC1234-42#other").unwrap().handle, HANDLE(3 as *mut c_void));
+        assert_eq!(monitors.get("ABC1234-42#").unwrap().handle, HANDLE(4 as *mut c_void));
+        assert!(!monitors.contains_key("ABC1234-42"));
+        assert_eq!(
+            captured.handles(),
+            vec![HANDLE(2 as *mut c_void), HANDLE(5 as *mut c_void)]
         );
     }
 }
