@@ -39,6 +39,12 @@ function withLatestForm(saved: Settings, live: Settings): Settings {
   return { ...saved, hotkeys: live.hotkeys, launchAtLogin: live.launchAtLogin };
 }
 
+function sameFormFields(file: Settings, form: Settings): boolean {
+  return file.launchAtLogin === form.launchAtLogin
+    && file.hotkeys.toMac === form.hotkeys.toMac
+    && file.hotkeys.toWindows === form.hotkeys.toWindows;
+}
+
 function outcomeText(outcome: Outcome): string {
   const delivery = outcome.delivery;
   if (delivery.status === "delivered") return "전달됨";
@@ -71,16 +77,25 @@ function App() {
     const task = saveQueue.current.then(async (committed) => {
       const live = settingsRef.current;
       if (!live) return committed;
+      let onDisk = committed;
       try {
         const base = committed ? withLatestForm(committed, live) : live;
-        const next = apply(base);
-        await invoke("save_settings", { settings: next });
-        setSettings(next);
-        setNotice(SAVED_NOTICE);
-        return next;
+        let saved = apply(base);
+        while (true) {
+          await invoke("save_settings", { settings: saved });
+          onDisk = saved;
+          const form = settingsRef.current ?? saved;
+          const aligned = withLatestForm(saved, form);
+          setSettings(aligned);
+          if (sameFormFields(saved, form)) {
+            setNotice(SAVED_NOTICE);
+            return saved;
+          }
+          saved = aligned;
+        }
       } catch (error) {
         setNotice(String(error));
-        return committed;
+        return onDisk;
       }
     });
     saveQueue.current = task;
