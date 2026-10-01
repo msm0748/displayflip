@@ -88,7 +88,8 @@ function App() {
           const aligned = withLatestForm(saved, form);
           setSettings(aligned);
           if (sameFormFields(saved, form)) {
-            setNotice(SAVED_NOTICE);
+            const shortcutError = await invoke<string | null>("shortcut_status");
+            setNotice(shortcutError ?? SAVED_NOTICE);
             return saved;
           }
           saved = aligned;
