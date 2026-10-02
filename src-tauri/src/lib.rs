@@ -312,14 +312,25 @@ fn persist_autolaunch_failure(path: &Path, settings: &domain::Settings, error: &
     failure.message
 }
 
-fn sync_startup_autolaunch(app: &tauri::AppHandle, path: &Path, settings: &domain::Settings) {
+fn sync_startup_autolaunch(
+    app: &tauri::AppHandle,
+    path: &Path,
+    settings: &domain::Settings,
+) -> Option<String> {
     if settings.launch_at_login {
         if let Err(error) = app.autolaunch().enable() {
             persist_autolaunch_failure(path, settings, &error.to_string());
         }
-        return;
+        return None;
     }
-    let _ = app.autolaunch().disable();
+    if let Err(error) = app.autolaunch().disable() {
+        return Some(persist_autolaunch_failure(
+            path,
+            settings,
+            &error.to_string(),
+        ));
+    }
+    None
 }
 
 fn tray_failure_message(error: &str) -> String {
@@ -391,11 +402,13 @@ pub fn run() {
         })
         .setup(|app| {
             let (settings_path, configured) = startup_settings(app);
-            if let Some(path) = &settings_path {
-                if let Ok(settings) = settings::load_settings(path) {
-                    sync_startup_autolaunch(app.handle(), path, &settings);
-                }
-            }
+            let autolaunch_notice = if let Some(path) = &settings_path {
+                settings::load_settings(path)
+                    .ok()
+                    .and_then(|settings| sync_startup_autolaunch(app.handle(), path, &settings))
+            } else {
+                None
+            };
             app.manage(AppState {
                 settings_path: settings_path.clone(),
                 gate: std::sync::Mutex::new(domain::SwitchGate::default()),
@@ -403,6 +416,9 @@ pub fn run() {
                 registered_shortcuts: std::sync::Mutex::new(Vec::new()),
                 tray_ready: AtomicBool::new(false),
             });
+            if let Some(message) = autolaunch_notice {
+                record_app_notice(app.state::<AppState>().inner(), message);
+            }
             if let Some(path) = &settings_path {
                 if let Ok(settings) = settings::load_settings(path) {
                     record_shortcut_registration(
@@ -495,6 +511,24 @@ mod tests {
         let disabled = autolaunch_failure(false, "busy");
         assert!(disabled.launch_at_login);
         assert_eq!(disabled.message, "로그인 자동 실행을 해제하지 못했습니다: busy");
+    }
+
+    #[test]
+    fn startup_disable_failure_rewrites_launch_at_login_to_true() {
+        let path = std::env::temp_dir().join(format!(
+            "displayflip-autolaunch-disable-{}-settings.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut settings = settings::default_settings();
+        settings.launch_at_login = false;
+        settings::save_settings(&path, &settings).unwrap();
+
+        let message = persist_autolaunch_failure(&path, &settings, "busy");
+        assert_eq!(message, "로그인 자동 실행을 해제하지 못했습니다: busy");
+        assert!(settings::load_settings(&path).unwrap().launch_at_login);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
