@@ -8,6 +8,7 @@ mod windows_monitor;
 mod macos_monitor;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
@@ -21,6 +22,7 @@ struct AppState {
     gate: std::sync::Mutex<domain::SwitchGate>,
     shortcut_error: std::sync::Mutex<Option<String>>,
     registered_shortcuts: std::sync::Mutex<Vec<Shortcut>>,
+    tray_ready: AtomicBool,
 }
 
 fn require_settings_path(path: &Option<PathBuf>) -> Result<&Path, String> {
@@ -50,15 +52,13 @@ fn save_settings(
     let path = require_settings_path(&state.settings_path)?;
     settings::save_settings(path, &settings)?;
     record_shortcut_registration(&state, replace_registered_shortcuts(&app, &settings.hotkeys));
-    if settings.launch_at_login {
-        if let Err(error) = app.autolaunch().enable() {
-            let mut rewritten = settings;
-            rewritten.launch_at_login = false;
-            let _ = settings::save_settings(path, &rewritten);
-            return Err(format!("로그인 자동 실행을 등록하지 못했습니다: {error}"));
-        }
+    let registered = if settings.launch_at_login {
+        app.autolaunch().enable()
     } else {
-        app.autolaunch().disable().map_err(|error| error.to_string())?;
+        app.autolaunch().disable()
+    };
+    if let Err(error) = registered {
+        return Err(persist_autolaunch_failure(path, &settings, &error.to_string()));
     }
     Ok(())
 }
@@ -276,6 +276,66 @@ fn record_shortcut_registration(state: &AppState, result: Result<(), String>) {
     }
 }
 
+fn record_app_notice(state: &AppState, message: String) {
+    if let Ok(mut slot) = state.shortcut_error.lock() {
+        *slot = Some(match slot.take() {
+            Some(existing) => format!("{existing}\n{message}"),
+            None => message,
+        });
+    }
+}
+
+struct AutolaunchFailure {
+    launch_at_login: bool,
+    message: String,
+}
+
+fn autolaunch_failure(requested: bool, error: &str) -> AutolaunchFailure {
+    if requested {
+        AutolaunchFailure {
+            launch_at_login: false,
+            message: format!("로그인 자동 실행을 등록하지 못했습니다: {error}"),
+        }
+    } else {
+        AutolaunchFailure {
+            launch_at_login: true,
+            message: format!("로그인 자동 실행을 해제하지 못했습니다: {error}"),
+        }
+    }
+}
+
+fn persist_autolaunch_failure(path: &Path, settings: &domain::Settings, error: &str) -> String {
+    let failure = autolaunch_failure(settings.launch_at_login, error);
+    let mut rewritten = settings.clone();
+    rewritten.launch_at_login = failure.launch_at_login;
+    let _ = settings::save_settings(path, &rewritten);
+    failure.message
+}
+
+fn sync_startup_autolaunch(app: &tauri::AppHandle, path: &Path, settings: &domain::Settings) {
+    if settings.launch_at_login {
+        if let Err(error) = app.autolaunch().enable() {
+            persist_autolaunch_failure(path, settings, &error.to_string());
+        }
+        return;
+    }
+    let _ = app.autolaunch().disable();
+}
+
+fn tray_failure_message(error: &str) -> String {
+    format!("트레이를 만들지 못했습니다: {error}")
+}
+
+fn hide_on_close(tray_exists: bool) -> bool {
+    tray_exists
+}
+
+fn tray_is_ready<R: tauri::Runtime>(window: &tauri::Window<R>) -> bool {
+    window
+        .try_state::<AppState>()
+        .is_some_and(|state| state.tray_ready.load(Ordering::Acquire))
+}
+
 fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     let to_mac = tauri::menu::MenuItem::with_id(app, "to-mac", "맥으로", true, None::<&str>)?;
     let to_windows = tauri::menu::MenuItem::with_id(app, "to-windows", "Windows로", true, None::<&str>)?;
@@ -306,7 +366,8 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     if let Some(icon) = icon {
         tray = tray.icon(icon);
     }
-    let _ = tray.build(app);
+    tray.build(app)?;
+    app.state::<AppState>().tray_ready.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -322,32 +383,40 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if hide_on_close(tray_is_ready(window)) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .setup(|app| {
             let (settings_path, configured) = startup_settings(app);
+            if let Some(path) = &settings_path {
+                if let Ok(settings) = settings::load_settings(path) {
+                    sync_startup_autolaunch(app.handle(), path, &settings);
+                }
+            }
             app.manage(AppState {
                 settings_path: settings_path.clone(),
                 gate: std::sync::Mutex::new(domain::SwitchGate::default()),
                 shortcut_error: std::sync::Mutex::new(None),
                 registered_shortcuts: std::sync::Mutex::new(Vec::new()),
+                tray_ready: AtomicBool::new(false),
             });
             if let Some(path) = &settings_path {
                 if let Ok(settings) = settings::load_settings(path) {
-                    if settings.launch_at_login && app.autolaunch().enable().is_err() {
-                        let mut rewritten = settings.clone();
-                        rewritten.launch_at_login = false;
-                        let _ = settings::save_settings(path, &rewritten);
-                    }
                     record_shortcut_registration(
                         app.state::<AppState>().inner(),
                         replace_registered_shortcuts(app.handle(), &settings.hotkeys),
                     );
                 }
             }
-            install_tray(app)?;
+            if let Err(error) = install_tray(app) {
+                record_app_notice(
+                    app.state::<AppState>().inner(),
+                    tray_failure_message(&error.to_string()),
+                );
+            }
             let autostart = std::env::args().any(|arg| arg == "--autostart");
             if domain::should_show_window(autostart, configured) {
                 if let Some(window) = app.get_webview_window("main") {
@@ -415,5 +484,27 @@ mod tests {
         assert!(parse_shortcut("Ctrl+Alt+M").is_ok());
         assert!(parse_shortcut("Ctrl+Alt+W").is_ok());
         assert!(parse_shortcut("Nope").unwrap_err().contains("단축키를 해석할 수 없습니다"));
+    }
+
+    #[test]
+    fn autolaunch_failure_matches_os_registration() {
+        let enabled = autolaunch_failure(true, "denied");
+        assert!(!enabled.launch_at_login);
+        assert_eq!(enabled.message, "로그인 자동 실행을 등록하지 못했습니다: denied");
+
+        let disabled = autolaunch_failure(false, "busy");
+        assert!(disabled.launch_at_login);
+        assert_eq!(disabled.message, "로그인 자동 실행을 해제하지 못했습니다: busy");
+    }
+
+    #[test]
+    fn close_hides_only_when_a_tray_exists() {
+        assert!(hide_on_close(true));
+        assert!(!hide_on_close(false));
+    }
+
+    #[test]
+    fn tray_build_failure_is_recorded_for_the_window() {
+        assert_eq!(tray_failure_message("missing icon"), "트레이를 만들지 못했습니다: missing icon");
     }
 }

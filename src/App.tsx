@@ -95,8 +95,17 @@ function App() {
           saved = aligned;
         }
       } catch (error) {
-        setNotice(String(error));
-        return onDisk;
+        const message = String(error);
+        try {
+          const reloaded = await invoke<Settings>("get_settings");
+          settingsRef.current = reloaded;
+          setSettings(reloaded);
+          setNotice(message);
+          return reloaded;
+        } catch {
+          setNotice(message);
+          return onDisk;
+        }
       }
     });
     saveQueue.current = task;
