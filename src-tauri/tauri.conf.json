@@ -16,8 +16,10 @@
         "label": "main",
         "title": "DisplayFlip",
         "width": 800,
-        "height": 600,
-        "visible": false
+        "height": 740,
+        "visible": false,
+        "minWidth": 360,
+        "minHeight": 480
       }
     ],
     "security": {
@@ -26,8 +28,12 @@
   },
   "bundle": {
     "active": true,
-    "resources": ["native/LICENSE-m1ddc.txt"],
-    "macOS": { "signingIdentity": "-" },
+    "resources": [
+      "native/LICENSE-m1ddc.txt"
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "targets": "all",
     "icon": [
       "icons/32x32.png",

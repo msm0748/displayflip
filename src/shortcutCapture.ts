@@ -24,3 +24,8 @@ export function shortcutFromStroke(event: ShortcutStroke, heldKey?: string): str
   else if (!/^F([1-9]|1[0-9]|2[0-4])$/.test(key) && !namedKeys.has(key)) return null;
   return [...modifiers, key].join("+");
 }
+
+export function formatShortcut(value: string): string {
+  const mac = navigator.platform.toLowerCase().includes("mac");
+  return value.split("+").map((key) => key === "Super" ? (mac ? "Command" : "Win") : key === "Alt" && mac ? "Option" : key).join(" + ");
+}
