@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "displayflip",
+  "productName": "DisplayFlip",
   "version": "0.1.0",
   "identifier": "com.displayflip.app",
   "build": {
@@ -13,9 +13,11 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "displayflip",
+        "label": "main",
+        "title": "DisplayFlip",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "visible": false
       }
     ],
     "security": {
