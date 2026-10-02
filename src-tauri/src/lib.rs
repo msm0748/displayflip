@@ -95,6 +95,16 @@ fn switch_to(state: tauri::State<AppState>, destination: domain::Destination) ->
 }
 
 #[tauri::command]
+fn switch_monitor(state: tauri::State<AppState>, destination: domain::Destination, monitor: u8) -> Result<domain::MonitorOutcome, String> {
+    let mut gate = state.gate.try_lock().map_err(|_| domain::PlanError::Busy.to_string())?;
+    let path = require_settings_path(&state.settings_path)?;
+    let settings = settings::load_settings(path)?;
+    let mut control = control::open_control();
+    let connected = control.list_monitors()?.into_iter().map(|item| item.id).collect::<Vec<_>>();
+    gate.run_monitor(&mut *control, &settings, destination, monitor, &connected).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn shortcut_status(state: tauri::State<AppState>) -> Option<String> {
     stored_notice(state.inner())
 }
@@ -468,6 +478,7 @@ pub fn run() {
             read_input,
             trial_set_input,
             switch_to,
+            switch_monitor,
             shortcut_status,
             set_shortcut_capture
         ])
