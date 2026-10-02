@@ -1,5 +1,5 @@
 import { useRef, useState, type KeyboardEvent } from "react";
-import { heldModifiers, shortcutFromStroke } from "./shortcutCapture";
+import { formatShortcut, heldModifiers, shortcutFromStroke } from "./shortcutCapture";
 
 interface Props {
   value: string;
@@ -32,8 +32,8 @@ export function ShortcutInput({ value, ready, onChange }: Props) {
   return <input
     readOnly
     data-shortcut-input="true"
-    value={preview ?? value}
-    placeholder={ready ? "키 조합을 누르세요" : "입력 준비 중…"}
+    value={formatShortcut(preview ?? value)}
+    placeholder={ready ? "키 조합을 누르세요" : "클릭하고 키 조합 입력"}
     aria-describedby="shortcut-help"
     autoComplete="off"
     onFocus={() => { heldKey.current = undefined; setPreview(""); }}
