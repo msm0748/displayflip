@@ -6,6 +6,8 @@ mod settings;
 mod windows_monitor;
 #[cfg(target_os = "macos")]
 mod macos_monitor;
+#[cfg(target_os = "macos")]
+mod ddc;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

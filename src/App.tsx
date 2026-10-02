@@ -81,11 +81,25 @@ function savedCode(value: number | null): string {
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [monitors, setMonitors] = useState<DetectedMonitor[]>([]);
+  const [refreshingMonitors, setRefreshingMonitors] = useState(false);
   const [notice, setNotice] = useState("");
   const [codes, setCodes] = useState<Record<MonitorIndex, string>>({ "1": "", "2": "" });
   const settingsRef = useRef<Settings | null>(null);
   const saveQueue = useRef<Promise<Settings | null>>(Promise.resolve(null));
   settingsRef.current = settings;
+
+  async function refreshMonitors() {
+    setRefreshingMonitors(true);
+    try {
+      const detected = await invoke<DetectedMonitor[]>("list_monitors");
+      setMonitors(detected);
+      setNotice(detected.length ? `모니터 ${detected.length}대를 찾았습니다.` : "연결된 외부 모니터가 없습니다.");
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setRefreshingMonitors(false);
+    }
+  }
 
   function enqueueSave(apply: (current: Settings) => Settings) {
     const task = saveQueue.current.then(async (committed) => {
@@ -214,6 +228,9 @@ function App() {
       <div className="row">
         <button type="button" onClick={() => void switchTo("mac")}>맥으로</button>
         <button type="button" onClick={() => void switchTo("windows")}>Windows로</button>
+        <button type="button" disabled={refreshingMonitors} onClick={() => void refreshMonitors()}>
+          {refreshingMonitors ? "찾는 중…" : "모니터 새로고침"}
+        </button>
       </div>
       {(["1", "2"] as const).map((index) => (
         <section key={index}>
