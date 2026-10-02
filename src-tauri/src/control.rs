@@ -7,7 +7,7 @@ pub fn open_control() -> Box<dyn MonitorControl + Send> {
     }
     #[cfg(target_os = "macos")]
     {
-        Box::new(crate::macos_monitor::UnverifiedMacControl)
+        Box::new(crate::macos_monitor::MacControl::open())
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {

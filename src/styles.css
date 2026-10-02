@@ -18,3 +18,9 @@ main {
 .notice {
   white-space: pre-line;
 }
+
+.shortcut-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}

@@ -26,6 +26,8 @@
   },
   "bundle": {
     "active": true,
+    "resources": ["native/LICENSE-m1ddc.txt"],
+    "macOS": { "signingIdentity": "-" },
     "targets": "all",
     "icon": [
       "icons/32x32.png",

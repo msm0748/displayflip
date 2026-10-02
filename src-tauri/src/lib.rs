@@ -6,13 +6,15 @@ mod settings;
 mod windows_monitor;
 #[cfg(target_os = "macos")]
 mod macos_monitor;
+#[cfg(target_os = "macos")]
+mod ddc;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 
 const SETTINGS_DIR_UNAVAILABLE: &str = "설정 디렉터리를 만들지 못했습니다.";
@@ -23,6 +25,8 @@ struct AppState {
     notice: std::sync::Mutex<WindowNotice>,
     registered_shortcuts: std::sync::Mutex<Vec<Shortcut>>,
     tray_ready: AtomicBool,
+    shortcut_capture: AtomicBool,
+    saved_hotkeys: std::sync::Mutex<domain::Hotkeys>,
 }
 
 fn require_settings_path(path: &Option<PathBuf>) -> Result<&Path, String> {
@@ -175,55 +179,24 @@ fn show_main(app: &tauri::AppHandle) {
 }
 
 fn parse_shortcut(value: &str) -> Result<Shortcut, String> {
-    let mut modifiers = Modifiers::empty();
-    let mut key = None;
-    for part in value.split('+') {
-        match part {
-            "Ctrl" => modifiers |= Modifiers::CONTROL,
-            "Alt" => modifiers |= Modifiers::ALT,
-            "Shift" => modifiers |= Modifiers::SHIFT,
-            "Super" => modifiers |= Modifiers::SUPER,
-            "A" => key = Some(Code::KeyA),
-            "B" => key = Some(Code::KeyB),
-            "C" => key = Some(Code::KeyC),
-            "D" => key = Some(Code::KeyD),
-            "E" => key = Some(Code::KeyE),
-            "F" => key = Some(Code::KeyF),
-            "G" => key = Some(Code::KeyG),
-            "H" => key = Some(Code::KeyH),
-            "I" => key = Some(Code::KeyI),
-            "J" => key = Some(Code::KeyJ),
-            "K" => key = Some(Code::KeyK),
-            "L" => key = Some(Code::KeyL),
-            "M" => key = Some(Code::KeyM),
-            "N" => key = Some(Code::KeyN),
-            "O" => key = Some(Code::KeyO),
-            "P" => key = Some(Code::KeyP),
-            "Q" => key = Some(Code::KeyQ),
-            "R" => key = Some(Code::KeyR),
-            "S" => key = Some(Code::KeyS),
-            "T" => key = Some(Code::KeyT),
-            "U" => key = Some(Code::KeyU),
-            "V" => key = Some(Code::KeyV),
-            "W" => key = Some(Code::KeyW),
-            "X" => key = Some(Code::KeyX),
-            "Y" => key = Some(Code::KeyY),
-            "Z" => key = Some(Code::KeyZ),
-            "0" => key = Some(Code::Digit0),
-            "1" => key = Some(Code::Digit1),
-            "2" => key = Some(Code::Digit2),
-            "3" => key = Some(Code::Digit3),
-            "4" => key = Some(Code::Digit4),
-            "5" => key = Some(Code::Digit5),
-            "6" => key = Some(Code::Digit6),
-            "7" => key = Some(Code::Digit7),
-            "8" => key = Some(Code::Digit8),
-            "9" => key = Some(Code::Digit9),
-            _ => return Err(format!("단축키를 해석할 수 없습니다: {value}")),
-        }
+    value.parse::<Shortcut>()
+        .map_err(|_| format!("단축키를 해석할 수 없습니다: {value}"))
+}
+
+#[tauri::command]
+fn set_shortcut_capture(app: tauri::AppHandle, capturing: bool) -> Result<(), String> {
+    update_shortcut_capture(&app, capturing)
+}
+
+fn update_shortcut_capture(app: &tauri::AppHandle, capturing: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.shortcut_capture.swap(capturing, Ordering::SeqCst) == capturing {
+        return Ok(());
     }
-    let key = key.ok_or_else(|| format!("단축키를 해석할 수 없습니다: {value}"))?;
-    Ok(Shortcut::new(Some(modifiers), key))
+    let hotkeys = state.saved_hotkeys.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let result = replace_registered_shortcuts(app, &hotkeys);
+    record_shortcut_registration(&state, result.clone());
+    result
 }
 
 fn remember_shortcuts(state: &AppState, shortcuts: Vec<Shortcut>) {
@@ -234,6 +207,7 @@ fn remember_shortcuts(state: &AppState, shortcuts: Vec<Shortcut>) {
 
 fn replace_registered_shortcuts(app: &tauri::AppHandle, hotkeys: &domain::Hotkeys) -> Result<(), String> {
     let state = app.state::<AppState>();
+    *state.saved_hotkeys.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = hotkeys.clone();
     let previous = state
         .registered_shortcuts
         .lock()
@@ -248,6 +222,10 @@ fn replace_registered_shortcuts(app: &tauri::AppHandle, hotkeys: &domain::Hotkey
         remember_shortcuts(&state, kept.clone());
     }
 
+    if state.shortcut_capture.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
     let mut registered = Vec::new();
     for (value, destination) in [
         (hotkeys.to_mac.as_str(), domain::Destination::Mac),
@@ -256,7 +234,8 @@ fn replace_registered_shortcuts(app: &tauri::AppHandle, hotkeys: &domain::Hotkey
         let shortcut = parse_shortcut(value)?;
         app.global_shortcut()
             .on_shortcut(shortcut, move |app, _shortcut, event| {
-                if event.state == ShortcutState::Pressed {
+                if event.state == ShortcutState::Pressed
+                    && !app.state::<AppState>().shortcut_capture.load(Ordering::SeqCst) {
                     perform_switch(app, destination);
                 }
             })
@@ -425,6 +404,13 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }) {
+                if let Some(state) = window.try_state::<AppState>() {
+                    if state.shortcut_capture.load(Ordering::SeqCst) {
+                        let _ = update_shortcut_capture(window.app_handle(), false);
+                    }
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if hide_on_close(tray_is_ready(window)) {
                     api.prevent_close();
@@ -447,6 +433,8 @@ pub fn run() {
                 notice: std::sync::Mutex::new(WindowNotice { parts: Vec::new() }),
                 registered_shortcuts: std::sync::Mutex::new(Vec::new()),
                 tray_ready: AtomicBool::new(false),
+                shortcut_capture: AtomicBool::new(false),
+                saved_hotkeys: std::sync::Mutex::new(settings::default_settings().hotkeys),
             });
             if let Some(message) = autolaunch_notice {
                 record_app_notice(app.state::<AppState>().inner(), message);
@@ -480,7 +468,8 @@ pub fn run() {
             read_input,
             trial_set_input,
             switch_to,
-            shortcut_status
+            shortcut_status,
+            set_shortcut_capture
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -535,6 +524,15 @@ mod tests {
     }
 
     #[test]
+    fn captured_function_keys_and_multiple_modifiers_parse() {
+        assert!(parse_shortcut("Ctrl+Alt+Shift+Super+M").is_ok());
+        assert!(parse_shortcut("Shift+F12").is_ok());
+        assert!(parse_shortcut("Ctrl+ArrowUp").is_ok());
+        assert!(parse_shortcut("Ctrl+Shift+Equal").is_ok());
+        assert!(parse_shortcut("Ctrl+M+W").is_err());
+    }
+
+    #[test]
     fn autolaunch_failure_matches_os_registration() {
         let enabled = autolaunch_failure(true, "denied");
         assert!(!enabled.launch_at_login);
@@ -582,6 +580,8 @@ mod tests {
             notice: std::sync::Mutex::new(WindowNotice { parts: Vec::new() }),
             registered_shortcuts: std::sync::Mutex::new(Vec::new()),
             tray_ready: AtomicBool::new(false),
+            shortcut_capture: AtomicBool::new(false),
+            saved_hotkeys: std::sync::Mutex::new(settings::default_settings().hotkeys),
         };
         let message = autolaunch_failure(true, "denied").message;
         record_app_notice(&state, message.clone());
