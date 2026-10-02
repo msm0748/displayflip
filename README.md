@@ -4,6 +4,36 @@
 
 React·TypeScript와 Tauri 2·Rust로 만들었으며, 영상 케이블을 통해 모니터에 명령을 보내는 DDC/CI를 사용합니다. 키보드·마우스 공유나 원격 접속 기능은 포함하지 않습니다.
 
+## 다운로드와 설치
+
+설치 파일은 [GitHub Releases](https://github.com/msm0748/displayflip/releases)에 첨부합니다. 큰 바이너리는 소스 저장소에 커밋하지 않고 릴리스 자산으로 관리합니다.
+
+| 배포 파일 | 대상 | 다운로드 |
+| --- | --- | --- |
+| `DisplayFlip_0.1.0_aarch64.dmg` | Apple Silicon Mac | [DMG 다운로드](https://github.com/msm0748/displayflip/releases/download/v0.1.0/DisplayFlip_0.1.0_aarch64.dmg) |
+
+DMG를 열고 **DisplayFlip**을 **Applications**로 드래그한 뒤 실행하세요. 이 파일은 로컬 사용용 임시 서명으로 만든 미공증 미리보기 버전이라 macOS에서 실행 확인이 필요할 수 있습니다. 출처와 파일을 신뢰하는 경우 시스템 설정의 **개인정보 보호 및 보안 → 그래도 열기**를 사용할 수 있습니다. 자세한 설명은 [Apple의 앱 실행 안내](https://support.apple.com/ko-kr/102445)를 참고하세요. Windows 설치 파일은 아직 배포하지 않으며, 아래 Windows 빌드 안내를 참고하세요.
+
+## 화면 미리보기
+
+### 화면 전환
+
+사용할 컴퓨터와 현재 모니터 연결을 한눈에 확인합니다.
+
+![Mac·Windows 화면 전환과 모니터 연결 상태](docs/images/screen-switch.jpg)
+
+### 모니터 연결 설정
+
+모니터별 Mac·Windows 연결 포트와 저장된 입력 번호를 확인합니다.
+
+![모니터 선택과 HDMI·DP 입력 번호 설정](docs/images/monitor-settings.jpg)
+
+### 단축키와 자동 실행
+
+단축키 칸에서 원하는 키 조합을 누르고 저장합니다. 캡처에 표시된 단축키는 사용자가 지정한 예시입니다.
+
+![전환 단축키와 로그인 자동 실행 설정](docs/images/shortcut-settings.jpg)
+
 ## 주요 기능
 
 - **Mac 사용하기 / Windows 사용하기** 버튼으로 두 모니터를 함께 전환
@@ -118,7 +148,7 @@ pnpm tauri build --bundles nsis
 
 ## 배포 방법
 
-현재 저장소에는 자동 빌드·릴리스 워크플로가 없습니다. OS별 배포 파일을 만들고 GitHub Releases에 올리는 방식입니다.
+현재 저장소에는 자동 빌드·릴리스 워크플로가 없습니다. OS별 배포 파일을 만들고 GitHub Releases에 올리는 방식입니다. 배포된 설치 파일 경로는 위 **다운로드와 설치**에서 확인할 수 있습니다.
 
 1. `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`의 버전을 같은 값으로 맞춥니다. Rust 검사 후 변경된 `Cargo.lock`도 함께 커밋합니다.
 2. 위 검사와 OS별 빌드를 실행하고, 생성된 앱에서 모니터 선택·양방향 전환·단축키·자동 실행을 확인합니다.
