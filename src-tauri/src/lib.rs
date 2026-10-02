@@ -20,7 +20,7 @@ const SETTINGS_DIR_UNAVAILABLE: &str = "설정 디렉터리를 만들지 못했�
 struct AppState {
     settings_path: Option<PathBuf>,
     gate: std::sync::Mutex<domain::SwitchGate>,
-    shortcut_error: std::sync::Mutex<Option<String>>,
+    notice: std::sync::Mutex<WindowNotice>,
     registered_shortcuts: std::sync::Mutex<Vec<Shortcut>>,
     tray_ready: AtomicBool,
 }
@@ -92,7 +92,7 @@ fn switch_to(state: tauri::State<AppState>, destination: domain::Destination) ->
 
 #[tauri::command]
 fn shortcut_status(state: tauri::State<AppState>) -> Option<String> {
-    state.shortcut_error.lock().ok().and_then(|error| error.clone())
+    stored_notice(state.inner())
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -267,21 +267,54 @@ fn replace_registered_shortcuts(app: &tauri::AppHandle, hotkeys: &domain::Hotkey
     Ok(())
 }
 
+enum NoticeKind {
+    Retained(String),
+    Shortcut(String),
+}
+
+struct WindowNotice {
+    parts: Vec<NoticeKind>,
+}
+
+impl WindowNotice {
+    fn text(&self) -> Option<String> {
+        if self.parts.is_empty() {
+            None
+        } else {
+            Some(
+                self.parts
+                    .iter()
+                    .map(|part| match part {
+                        NoticeKind::Retained(message) | NoticeKind::Shortcut(message) => message.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+    }
+}
+
+fn stored_notice(state: &AppState) -> Option<String> {
+    state.notice.lock().ok().and_then(|notice| notice.text())
+}
+
 fn record_shortcut_registration(state: &AppState, result: Result<(), String>) {
-    let message = result
-        .err()
-        .map(|error| format!("단축키를 등록하지 못했습니다: {error}"));
-    if let Ok(mut slot) = state.shortcut_error.lock() {
-        *slot = message;
+    let Ok(mut notice) = state.notice.lock() else {
+        return;
+    };
+    notice
+        .parts
+        .retain(|part| !matches!(part, NoticeKind::Shortcut(_)));
+    if let Err(error) = result {
+        notice.parts.push(NoticeKind::Shortcut(format!(
+            "단축키를 등록하지 못했습니다: {error}"
+        )));
     }
 }
 
 fn record_app_notice(state: &AppState, message: String) {
-    if let Ok(mut slot) = state.shortcut_error.lock() {
-        *slot = Some(match slot.take() {
-            Some(existing) => format!("{existing}\n{message}"),
-            None => message,
-        });
+    if let Ok(mut notice) = state.notice.lock() {
+        notice.parts.push(NoticeKind::Retained(message));
     }
 }
 
@@ -317,13 +350,12 @@ fn sync_startup_autolaunch(
     path: &Path,
     settings: &domain::Settings,
 ) -> Option<String> {
-    if settings.launch_at_login {
-        if let Err(error) = app.autolaunch().enable() {
-            persist_autolaunch_failure(path, settings, &error.to_string());
-        }
-        return None;
-    }
-    if let Err(error) = app.autolaunch().disable() {
+    let registered = if settings.launch_at_login {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    if let Err(error) = registered {
         return Some(persist_autolaunch_failure(
             path,
             settings,
@@ -412,7 +444,7 @@ pub fn run() {
             app.manage(AppState {
                 settings_path: settings_path.clone(),
                 gate: std::sync::Mutex::new(domain::SwitchGate::default()),
-                shortcut_error: std::sync::Mutex::new(None),
+                notice: std::sync::Mutex::new(WindowNotice { parts: Vec::new() }),
                 registered_shortcuts: std::sync::Mutex::new(Vec::new()),
                 tray_ready: AtomicBool::new(false),
             });
@@ -540,5 +572,25 @@ mod tests {
     #[test]
     fn tray_build_failure_is_recorded_for_the_window() {
         assert_eq!(tray_failure_message("missing icon"), "트레이를 만들지 못했습니다: missing icon");
+    }
+
+    #[test]
+    fn successful_shortcut_registration_keeps_autolaunch_notice() {
+        let state = AppState {
+            settings_path: None,
+            gate: std::sync::Mutex::new(domain::SwitchGate::default()),
+            notice: std::sync::Mutex::new(WindowNotice { parts: Vec::new() }),
+            registered_shortcuts: std::sync::Mutex::new(Vec::new()),
+            tray_ready: AtomicBool::new(false),
+        };
+        let message = autolaunch_failure(true, "denied").message;
+        record_app_notice(&state, message.clone());
+        record_shortcut_registration(&state, Err("taken".to_string()));
+        let during = stored_notice(&state).expect("autolaunch and shortcut notices");
+        assert!(during.contains(&message));
+        assert!(during.contains("단축키를 등록하지 못했습니다: taken"));
+
+        record_shortcut_registration(&state, Ok(()));
+        assert_eq!(stored_notice(&state).as_deref(), Some(message.as_str()));
     }
 }

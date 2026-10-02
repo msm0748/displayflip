@@ -30,6 +30,12 @@ interface Outcome {
 
 const CODE_RANGE_NOTICE = "입력 번호는 0부터 255까지의 정수여야 합니다.";
 const SAVED_NOTICE = "설정을 저장했습니다.";
+const AUTOLAUNCH_REGISTER_FAILURE = "로그인 자동 실행을 등록하지 못했습니다";
+const AUTOLAUNCH_DISABLE_FAILURE = "로그인 자동 실행을 해제하지 못했습니다";
+
+function autolaunchFileWasRewritten(message: string): boolean {
+  return message.includes(AUTOLAUNCH_REGISTER_FAILURE) || message.includes(AUTOLAUNCH_DISABLE_FAILURE);
+}
 
 function roleFrom(settings: Settings, index: MonitorIndex): MonitorRole {
   return settings.monitors[index] ?? { id: "", hdmiCode: null, dpCode: null };
@@ -96,14 +102,18 @@ function App() {
         }
       } catch (error) {
         const message = String(error);
+        setNotice(message);
+        if (!autolaunchFileWasRewritten(message)) {
+          return onDisk;
+        }
         try {
           const reloaded = await invoke<Settings>("get_settings");
-          settingsRef.current = reloaded;
-          setSettings(reloaded);
-          setNotice(message);
+          const form = settingsRef.current ?? reloaded;
+          const adopted = { ...reloaded, hotkeys: form.hotkeys };
+          settingsRef.current = adopted;
+          setSettings(adopted);
           return reloaded;
         } catch {
-          setNotice(message);
           return onDisk;
         }
       }
