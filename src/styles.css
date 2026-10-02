@@ -20,7 +20,7 @@ button { transition: background-color .15s, border-color .15s; }
 .app-shell { max-width: 880px; margin: 0 auto; padding: 24px 32px 28px; }
 .app-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 9px; font-family: "SF Pro Display", -apple-system, sans-serif; font-size: 19px; font-weight: 700; letter-spacing: -.5px; }
-.brand svg { width: 27px; height: 27px; color: var(--accent); }
+.brand img { width: 32px; height: 32px; object-fit: contain; }
 .navigation { display: flex; background: #e9edf3; padding: 4px; border-radius: 10px; gap: 3px; }
 .navigation button { border: 0; border-radius: 7px; padding: 8px 17px; background: transparent; color: #536373; font-size: 13px; font-weight: 600; }
 .navigation button[aria-current="page"] { background: white; color: var(--ink); box-shadow: 0 1px 3px #1c2d4212; }

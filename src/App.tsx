@@ -277,7 +277,7 @@ function App() {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div className="brand"><MonitorIcon /><span>DisplayFlip</span></div>
+        <div className="brand"><img src="/displayflip-icon.png" alt="" width="32" height="32" /><span>DisplayFlip</span></div>
         <nav aria-label="화면 메뉴" className="navigation">
           <button type="button" aria-current={page === "switch" ? "page" : undefined} onClick={() => setPage("switch")}>화면 전환</button>
           <button type="button" aria-current={page === "settings" ? "page" : undefined} onClick={() => setPage("settings")}>설정</button>
