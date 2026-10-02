@@ -30,8 +30,16 @@ interface Outcome {
 
 const CODE_RANGE_NOTICE = "입력 번호는 0부터 255까지의 정수여야 합니다.";
 const SAVED_NOTICE = "설정을 저장했습니다.";
+const SHORTCUT_REGISTER_FAILURE = "단축키를 등록하지 못했습니다";
 const AUTOLAUNCH_REGISTER_FAILURE = "로그인 자동 실행을 등록하지 못했습니다";
 const AUTOLAUNCH_DISABLE_FAILURE = "로그인 자동 실행을 해제하지 못했습니다";
+
+function noticeAfterSuccessfulSave(shortcutStatus: string | null): string {
+  if (shortcutStatus?.includes(SHORTCUT_REGISTER_FAILURE)) {
+    return shortcutStatus;
+  }
+  return SAVED_NOTICE;
+}
 
 function autolaunchFileWasRewritten(message: string): boolean {
   return message.includes(AUTOLAUNCH_REGISTER_FAILURE) || message.includes(AUTOLAUNCH_DISABLE_FAILURE);
@@ -95,7 +103,7 @@ function App() {
           setSettings(aligned);
           if (sameFormFields(saved, form)) {
             const shortcutError = await invoke<string | null>("shortcut_status");
-            setNotice(shortcutError ?? SAVED_NOTICE);
+            setNotice(noticeAfterSuccessfulSave(shortcutError));
             return saved;
           }
           saved = aligned;
