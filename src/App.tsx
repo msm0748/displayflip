@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
+import { ShortcutInput } from "./ShortcutInput";
 
 type Destination = "mac" | "windows";
 type MonitorIndex = "1" | "2";
@@ -84,9 +85,27 @@ function App() {
   const [refreshingMonitors, setRefreshingMonitors] = useState(false);
   const [notice, setNotice] = useState("");
   const [codes, setCodes] = useState<Record<MonitorIndex, string>>({ "1": "", "2": "" });
+  const [shortcutCaptureReady, setShortcutCaptureReady] = useState(false);
+  const shortcutCaptureFocused = useRef(false);
+  const shortcutCaptureRequest = useRef(0);
+  const shortcutCaptureQueue = useRef<Promise<void>>(Promise.resolve());
   const settingsRef = useRef<Settings | null>(null);
   const saveQueue = useRef<Promise<Settings | null>>(Promise.resolve(null));
   settingsRef.current = settings;
+
+  async function captureShortcuts(capturing: boolean) {
+    shortcutCaptureFocused.current = capturing;
+    const request = ++shortcutCaptureRequest.current;
+    setShortcutCaptureReady(false);
+    const operation = shortcutCaptureQueue.current.then(() => invoke<void>("set_shortcut_capture", { capturing }));
+    shortcutCaptureQueue.current = operation.catch(() => {});
+    try {
+      await operation;
+      if (request === shortcutCaptureRequest.current && capturing && shortcutCaptureFocused.current) setShortcutCaptureReady(true);
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
 
   async function refreshMonitors() {
     setRefreshingMonitors(true);
@@ -145,6 +164,12 @@ function App() {
   }
 
   useEffect(() => {
+    const pauseCapture = () => { void captureShortcuts(false); };
+    const resumeCapture = () => {
+      if (document.activeElement?.matches("[data-shortcut-input]")) void captureShortcuts(true);
+    };
+    window.addEventListener("blur", pauseCapture);
+    window.addEventListener("focus", resumeCapture);
     void invoke<Settings>("get_settings").then(setSettings).catch((error: unknown) => {
       setNotice(String(error));
     });
@@ -159,6 +184,9 @@ function App() {
       else if (event.payload.outcomes) setNotice(event.payload.outcomes.map(outcomeText).join("\n"));
     });
     return () => {
+      window.removeEventListener("blur", pauseCapture);
+      window.removeEventListener("focus", resumeCapture);
+      void invoke("set_shortcut_capture", { capturing: false }).catch(() => {});
       void unlisten.then((stop) => stop());
     };
   }, []);
@@ -259,14 +287,25 @@ function App() {
           </div>
         </section>
       ))}
+      <div
+        className="shortcut-fields"
+        onFocus={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) void captureShortcuts(true);
+        }}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) void captureShortcuts(false);
+        }}
+      >
       <label>
         맥으로 단축키
-        <input value={settings.hotkeys.toMac} onChange={(event) => setSettings({ ...settings, hotkeys: { ...settings.hotkeys, toMac: event.target.value } })} />
+        <ShortcutInput value={settings.hotkeys.toMac} ready={shortcutCaptureReady} onChange={(value) => setSettings((current) => current && ({ ...current, hotkeys: { ...current.hotkeys, toMac: value } }))} />
       </label>
       <label>
         Windows로 단축키
-        <input value={settings.hotkeys.toWindows} onChange={(event) => setSettings({ ...settings, hotkeys: { ...settings.hotkeys, toWindows: event.target.value } })} />
+        <ShortcutInput value={settings.hotkeys.toWindows} ready={shortcutCaptureReady} onChange={(value) => setSettings((current) => current && ({ ...current, hotkeys: { ...current.hotkeys, toWindows: value } }))} />
       </label>
+      <small id="shortcut-help">칸을 선택하고 키 조합을 누르세요. Ctrl·Alt·Shift·Command와 일반 키 하나를 함께 사용할 수 있습니다. Esc로 입력 종료, Tab으로 이동합니다.</small>
+      </div>
       <label>
         <input type="checkbox" checked={settings.launchAtLogin} onChange={(event) => setSettings({ ...settings, launchAtLogin: event.target.checked })} />
         로그인 시 실행
