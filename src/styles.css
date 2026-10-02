@@ -46,6 +46,16 @@ h2 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -.2px; }
 .text-button { border: 0; background: transparent; color: var(--accent); padding: 6px 0; font-size: 12px; font-weight: 550; }
 .text-button:not(:disabled):hover { color: #143d97; text-decoration: underline; }
 .monitor-summary { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
+.monitor-identity { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.overview-tools, .individual-actions { display: flex; gap: 10px; align-items: center; }
+.individual-actions { flex-shrink: 0; }
+.individual-actions .secondary-button { padding: 9px 11px; min-width: 80px; font-size: 12px; }
+@media (max-width: 620px) {
+  .monitor-summary { flex-wrap: wrap; }
+  .individual-actions { flex-basis: calc(100% - 40px); margin-left: 40px; }
+  .individual-actions .secondary-button { flex: 1; }
+  .section-heading { flex-wrap: wrap; }
+}
 .monitor-number { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid #d3dce6; color: #526373; background: #fff; border-radius: 8px; font-size: 12px; font-weight: 650; }
 .monitor-summary strong { display: block; font-size: 13px; font-weight: 600; }
 .monitor-route { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; }

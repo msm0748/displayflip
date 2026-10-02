@@ -76,6 +76,7 @@ impl MissingItem {
 pub enum PlanError {
     Incomplete { missing: Vec<MissingItem> },
     SameMonitor,
+    InvalidMonitor,
     Busy,
 }
 
@@ -87,6 +88,7 @@ impl std::fmt::Display for PlanError {
                 write!(f, "설정이 완료되지 않았습니다: {}", labels.join(", "))
             }
             PlanError::SameMonitor => write!(f, "모니터 1과 모니터 2는 서로 다른 모니터여야 합니다."),
+            PlanError::InvalidMonitor => write!(f, "모니터 번호는 1 또는 2여야 합니다."),
             PlanError::Busy => write!(f, "이미 전환 중입니다."),
         }
     }
@@ -212,6 +214,39 @@ pub struct SwitchGate {
 }
 
 impl SwitchGate {
+    pub fn run_monitor<C: MonitorControl + ?Sized>(
+        &mut self,
+        control: &mut C,
+        settings: &Settings,
+        destination: Destination,
+        index: u8,
+        connected_ids: &[String],
+    ) -> Result<MonitorOutcome, PlanError> {
+        if self.busy {
+            return Err(PlanError::Busy);
+        }
+        let (selected, monitor_missing, disconnected) = match index {
+            1 => (&settings.monitors.monitor1, MissingItem::Monitor1, MissingItem::Monitor1Disconnected),
+            2 => (&settings.monitors.monitor2, MissingItem::Monitor2, MissingItem::Monitor2Disconnected),
+            _ => return Err(PlanError::InvalidMonitor),
+        };
+        let selected = selected.as_ref().filter(|monitor| !monitor.id.is_empty())
+            .ok_or_else(|| PlanError::Incomplete { missing: vec![monitor_missing] })?;
+        let mut missing = Vec::new();
+        let code = code_for(selected, destination, index, &mut missing);
+        if !connected_ids.contains(&selected.id) {
+            missing.push(disconnected);
+        }
+        if !missing.is_empty() {
+            return Err(PlanError::Incomplete { missing });
+        }
+        self.busy = true;
+        let guard = BusyGuard(&mut self.busy);
+        let outcome = execute(control, index, &selected.id, code.unwrap());
+        drop(guard);
+        Ok(outcome)
+    }
+
     pub fn run<C: MonitorControl + ?Sized>(
         &mut self,
         control: &mut C,
@@ -461,6 +496,52 @@ mod tests {
         let outcome = gate.trial(&mut fake, "mon-1", 17).unwrap();
         assert_eq!(outcome.role, 0);
         assert!(matches!(outcome.delivery, Delivery::Delivered));
+    }
+
+    #[test]
+    fn individual_switch_only_writes_selected_monitor_without_other_configuration() {
+        let mut settings = ready();
+        settings.monitors.monitor1 = None;
+        settings.monitors.monitor2.as_mut().unwrap().dp_code = None;
+        let mut gate = SwitchGate::default();
+        let mut fake = Fake { fail_set: false, read: ReadMode::Fail, sets: Vec::new() };
+        let outcome = gate.run_monitor(&mut fake, &settings, Destination::Windows, 2, &["mon-2".into()]).unwrap();
+        assert_eq!(fake.sets, vec![("mon-2".into(), 17)]);
+        assert_eq!(outcome.role, 2);
+        assert!(matches!(outcome.delivery, Delivery::Unconfirmed));
+        assert!(!gate.busy);
+    }
+
+    #[test]
+    fn individual_switch_uses_each_monitors_destination_port() {
+        for (index, destination, expected) in [(1, Destination::Mac, 17), (1, Destination::Windows, 15), (2, Destination::Mac, 15), (2, Destination::Windows, 17)] {
+            let mut gate = SwitchGate::default();
+            let mut fake = Fake { fail_set: false, read: ReadMode::Fail, sets: Vec::new() };
+            gate.run_monitor(&mut fake, &ready(), destination, index, &["mon-1".into(), "mon-2".into()]).unwrap();
+            assert_eq!(fake.sets, vec![(format!("mon-{index}"), expected)]);
+        }
+    }
+
+    #[test]
+    fn individual_switch_rejects_missing_disconnected_and_invalid_targets_before_writing() {
+        let mut no_code = ready();
+        no_code.monitors.monitor1.as_mut().unwrap().hdmi_code = None;
+        let mut no_monitor = ready();
+        no_monitor.monitors.monitor1 = None;
+        for (settings, index, connected) in [(no_code, 1, vec!["mon-1".into()]), (no_monitor, 1, vec!["mon-1".into()]), (ready(), 1, vec!["mon-2".into()]), (ready(), 3, vec!["mon-1".into()])] {
+            let mut gate = SwitchGate::default();
+            let mut fake = Fake { fail_set: false, read: ReadMode::Match, sets: Vec::new() };
+            assert!(gate.run_monitor(&mut fake, &settings, Destination::Mac, index, &connected).is_err());
+            assert!(fake.sets.is_empty());
+        }
+    }
+
+    #[test]
+    fn individual_switch_shares_busy_guard_with_all_monitor_switches() {
+        let mut gate = SwitchGate { busy: true };
+        let mut fake = Fake { fail_set: false, read: ReadMode::Match, sets: Vec::new() };
+        assert!(matches!(gate.run_monitor(&mut fake, &ready(), Destination::Mac, 1, &["mon-1".into()]), Err(PlanError::Busy)));
+        assert!(fake.sets.is_empty());
     }
 
     #[test]

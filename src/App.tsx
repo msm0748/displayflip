@@ -83,6 +83,9 @@ function savedCode(value: number | null): string {
 function App() {
   const [page, setPage] = useState<"switch" | "settings">("switch");
   const [switching, setSwitching] = useState<Destination | null>(null);
+  const [switchingMonitor, setSwitchingMonitor] = useState<MonitorIndex | null>(null);
+  const switchInFlight = useRef(false);
+  const monitorRefreshInFlight = useRef(false);
   const [saving, setSaving] = useState(0);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [appliedSettings, setAppliedSettings] = useState<Settings | null>(null);
@@ -112,16 +115,19 @@ function App() {
     }
   }
 
-  async function refreshMonitors() {
+  async function refreshMonitors(announce = true) {
+    if (monitorRefreshInFlight.current) return;
+    monitorRefreshInFlight.current = true;
     setRefreshingMonitors(true);
     try {
       const detected = await invoke<DetectedMonitor[]>("list_monitors");
       setMonitors(detected);
-      setNotice(detected.length ? `모니터 ${detected.length}대를 찾았습니다.` : "연결된 외부 모니터가 없습니다.");
+      if (announce) setNotice(detected.length ? `모니터 ${detected.length}대를 찾았습니다.` : "연결된 외부 모니터가 없습니다.");
     } catch (error) {
-      setNotice(String(error));
+      if (announce) setNotice(String(error));
     } finally {
       setRefreshingMonitors(false);
+      monitorRefreshInFlight.current = false;
     }
   }
 
@@ -176,15 +182,17 @@ function App() {
     const pauseCapture = () => { void captureShortcuts(false); };
     const resumeCapture = () => {
       if (document.activeElement?.matches("[data-shortcut-input]")) void captureShortcuts(true);
+      void refreshMonitors(false);
     };
     window.addEventListener("blur", pauseCapture);
     window.addEventListener("focus", resumeCapture);
     void invoke<Settings>("get_settings").then((loaded) => { setSettings(loaded); setAppliedSettings(loaded); }).catch((error: unknown) => {
       setNotice(String(error));
     });
-    void invoke<DetectedMonitor[]>("list_monitors").then(setMonitors).catch((error: unknown) => {
-      setNotice(String(error));
-    });
+    void refreshMonitors(false);
+    const monitorTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible" && !switchInFlight.current) void refreshMonitors(false);
+    }, 10000);
     void invoke<string | null>("shortcut_status").then((error) => {
       if (error) setNotice(error);
     });
@@ -195,6 +203,7 @@ function App() {
     return () => {
       window.removeEventListener("blur", pauseCapture);
       window.removeEventListener("focus", resumeCapture);
+      window.clearInterval(monitorTimer);
       void invoke("set_shortcut_capture", { capturing: false }).catch(() => {});
       void unlisten.then((stop) => stop());
     };
@@ -209,16 +218,23 @@ function App() {
     );
   }
 
-  async function switchTo(destination: Destination) {
-    if (switching) return;
+  async function switchTo(destination: Destination, monitor?: MonitorIndex) {
+    if (switchInFlight.current) return;
+    switchInFlight.current = true;
     setSwitching(destination);
+    setSwitchingMonitor(monitor ?? null);
     try {
-      const outcomes = await invoke<Outcome[]>("switch_to", { destination });
+      const outcomes = monitor
+        ? [await invoke<Outcome>("switch_monitor", { destination, monitor: Number(monitor) })]
+        : await invoke<Outcome[]>("switch_to", { destination });
       setNotice(outcomes.map(outcomeText).join("\n"));
     } catch (error) {
       setNotice(String(error));
     } finally {
       setSwitching(null);
+      setSwitchingMonitor(null);
+      switchInFlight.current = false;
+      void refreshMonitors(false);
     }
   }
 
@@ -263,11 +279,12 @@ function App() {
     }
   }
 
-  const destinationReady = (destination: Destination) => (["1", "2"] as const).every((index) => {
+  const monitorReady = (index: MonitorIndex, destination: Destination) => {
     const monitor = role(index);
     const usesHdmi = destination === "mac" ? index === "1" : index === "2";
     return monitor.id && (usesHdmi ? monitor.hdmiCode : monitor.dpCode) !== null && monitors.some((item) => item.id === monitor.id);
-  }) && role("1").id !== role("2").id;
+  };
+  const destinationReady = (destination: Destination) => (["1", "2"] as const).every((index) => monitorReady(index, destination)) && role("1").id !== role("2").id;
   const configured = destinationReady("mac") && destinationReady("windows");
   const monitorName = (index: MonitorIndex) => monitors.find((monitor) => monitor.id === role(index).id)?.name ?? "모니터를 선택해주세요";
   const shortcutLabel = formatShortcut;
@@ -286,24 +303,27 @@ function App() {
       {notice && <div className={`notice ${/실패|못했|못합니다|정수여야|동일|서로 다른/.test(notice) ? "notice-warning" : ""}`} role="status" aria-live="polite"><span className="notice-label">알림</span><p>{notice}</p><button type="button" className="notice-close" aria-label="알림 닫기" onClick={() => setNotice("")}>×</button></div>}
 
       {page === "switch" ? <>
-        <div className="page-heading"><p className="eyebrow">두 모니터를 한 번에</p><h1>어느 컴퓨터를 사용할까요?</h1><p>사용할 컴퓨터를 선택하면 모니터 입력을 함께 바꿉니다.</p></div>
-        {!configured && <div className="setup-prompt"><span>아직 준비되지 않은 연결이 있습니다. 모니터와 각 컴퓨터의 입력을 확인해주세요.</span><button type="button" onClick={() => setPage("settings")}>모니터 설정하기 <span aria-hidden="true">→</span></button></div>}
+        <div className="page-heading"><p className="eyebrow">함께 또는 모니터별로</p><h1>어느 컴퓨터를 사용할까요?</h1><p>두 대를 함께 바꾸거나, 아래에서 모니터 한 대만 전환하세요.</p></div>
+        {!configured && <div className="setup-prompt"><span>두 대를 함께 전환하려면 연결 설정을 확인해주세요. 준비된 모니터는 아래에서 개별 전환할 수 있습니다.</span><button type="button" onClick={() => setPage("settings")}>모니터 설정하기 <span aria-hidden="true">→</span></button></div>}
         <div className="switch-grid">
           {(["mac", "windows"] as const).map((destination) => <button
             className={`switch-card ${destination}`} type="button" key={destination}
-            disabled={!destinationReady(destination) || switching !== null} aria-busy={switching === destination}
+            disabled={!destinationReady(destination) || switching !== null} aria-busy={switching === destination && switchingMonitor === null}
             onClick={() => void switchTo(destination)}>
             <span className="computer-mark">{destination === "mac" ? <MonitorIcon /> : <WindowsIcon />}</span>
-            <span className="switch-card-title">{switching === destination ? "전환 요청 중…" : destination === "mac" ? "Mac 사용하기" : "Windows 사용하기"}<span aria-hidden="true">↗</span></span>
+            <span className="switch-card-title">{switching === destination && switchingMonitor === null ? "전환 요청 중…" : destination === "mac" ? "모두 Mac으로" : "모두 Windows로"}<span aria-hidden="true">↗</span></span>
             <span className="switch-card-detail">모니터 1 {destination === "mac" ? "HDMI" : "DP"}<span aria-hidden="true"> · </span>모니터 2 {destination === "mac" ? "DP" : "HDMI"}</span>
             <span className="shortcut-badge" aria-label={`단축키 ${shortcutLabel(destination === "mac" ? displayedHotkeys.toMac : displayedHotkeys.toWindows)}`}>{shortcutLabel(destination === "mac" ? displayedHotkeys.toMac : displayedHotkeys.toWindows)}</span>
           </button>)}
         </div>
         <section className="monitor-overview" aria-labelledby="monitor-overview-title">
-          <div className="section-heading"><h2 id="monitor-overview-title">전환할 모니터</h2><button className="text-button" type="button" onClick={() => setPage("settings")}>연결 설정 <span aria-hidden="true">→</span></button></div>
+          <div className="section-heading"><h2 id="monitor-overview-title">모니터별 전환</h2><div className="overview-tools"><button className="text-button" type="button" disabled={refreshingMonitors} onClick={() => void refreshMonitors()}>{refreshingMonitors ? "확인 중…" : "연결 확인"}</button><button className="text-button" type="button" onClick={() => setPage("settings")}>연결 설정 <span aria-hidden="true">→</span></button></div></div>
           {(["1", "2"] as const).map((index) => <div className="monitor-summary" key={index}>
-            <span className="monitor-number">{index}</span><div><strong>{role(index).id ? monitorName(index) : "모니터를 선택해주세요"}</strong><span className="monitor-route">Mac {index === "1" ? "HDMI" : "DP"} <span aria-hidden="true">/</span> Windows {index === "1" ? "DP" : "HDMI"}</span></div>
+            <span className="monitor-number">{index}</span><div className="monitor-identity"><strong>{role(index).id ? monitorName(index) : "모니터를 선택해주세요"}</strong><span className="monitor-route">Mac {index === "1" ? "HDMI" : "DP"} <span aria-hidden="true">/</span> Windows {index === "1" ? "DP" : "HDMI"}</span></div>
             <span className={`connection-state ${monitors.some((monitor) => monitor.id === role(index).id) ? "connected" : ""}`}>{!role(index).id ? "설정 필요" : monitors.some((monitor) => monitor.id === role(index).id) ? "연결됨" : "연결 확인 필요"}</span>
+            <div className="individual-actions" role="group" aria-label={`모니터 ${index} 전환`}>
+              {(["mac", "windows"] as const).map((destination) => <button className="secondary-button" type="button" key={destination} disabled={!monitorReady(index, destination) || switching !== null} aria-busy={switchingMonitor === index && switching === destination} aria-label={`모니터 ${index} ${destination === "mac" ? "Mac" : "Windows"}으로 전환`} onClick={() => void switchTo(destination, index)}>{switchingMonitor === index && switching === destination ? "전환 중…" : destination === "mac" ? "Mac으로" : "Windows로"}</button>)}
+            </div>
           </div>)}
         </section>
         <p className="quiet-help">창을 닫아도 단축키로 전환할 수 있습니다.</p>
