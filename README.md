@@ -1,5 +1,7 @@
 # DisplayFlip
 
+<img src="src-tauri/icons/128x128.png" alt="DisplayFlip 앱 아이콘" width="96" height="96" />
+
 **Mac과 Windows PC가 공유하는 모니터 두 대의 입력을 버튼이나 단축키로 함께 바꾸는 데스크톱 앱입니다.** 모니터 메뉴를 매번 열지 않고 사용할 컴퓨터를 선택하면 HDMI·DisplayPort(DP) 입력을 전환합니다.
 
 React·TypeScript와 Tauri 2·Rust로 만들었으며, 영상 케이블을 통해 모니터에 명령을 보내는 DDC/CI를 사용합니다. 키보드·마우스 공유나 원격 접속 기능은 포함하지 않습니다.
@@ -10,7 +12,7 @@ React·TypeScript와 Tauri 2·Rust로 만들었으며, 영상 케이블을 통�
 
 | 배포 파일 | 대상 | 다운로드 |
 | --- | --- | --- |
-| `DisplayFlip_0.1.0_aarch64.dmg` | Apple Silicon Mac | [DMG 다운로드](https://github.com/msm0748/displayflip/releases/download/v0.1.0/DisplayFlip_0.1.0_aarch64.dmg) |
+| `DisplayFlip_0.1.1_aarch64.dmg` | Apple Silicon Mac | [DMG 다운로드](https://github.com/msm0748/displayflip/releases/download/v0.1.1/DisplayFlip_0.1.1_aarch64.dmg) |
 
 DMG를 열고 **DisplayFlip**을 **Applications**로 드래그한 뒤 실행하세요. 이 파일은 로컬 사용용 임시 서명으로 만든 미공증 미리보기 버전이라 macOS에서 실행 확인이 필요할 수 있습니다. 출처와 파일을 신뢰하는 경우 시스템 설정의 **개인정보 보호 및 보안 → 그래도 열기**를 사용할 수 있습니다. 자세한 설명은 [Apple의 앱 실행 안내](https://support.apple.com/ko-kr/102445)를 참고하세요. Windows 설치 파일은 아직 배포하지 않으며, 아래 Windows 빌드 안내를 참고하세요.
 
