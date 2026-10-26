@@ -298,6 +298,10 @@ impl Drop for BusyGuard<'_> {
 }
 
 fn execute<C: MonitorControl + ?Sized>(control: &mut C, role: u8, id: &str, code: u8) -> MonitorOutcome {
+    // Re-selecting the current input makes some monitors resync and flicker.
+    if control.get_input(id) == Ok(code) {
+        return MonitorOutcome { role, monitor_id: id.into(), delivery: Delivery::Delivered };
+    }
     let delivery = match control.set_input(id, code) {
         Err(reason) => Delivery::Failed { reason },
         Ok(()) => {
@@ -444,9 +448,10 @@ mod tests {
                 Ok(())
             }
         }
-        fn get_input(&mut self, _id: &str) -> Result<u8, String> {
+        fn get_input(&mut self, id: &str) -> Result<u8, String> {
             match self.read {
-                ReadMode::Match => Ok(17),
+                // Reports the last input written to this monitor; another input before any write.
+                ReadMode::Match => Ok(self.sets.iter().rev().find(|(set_id, _)| set_id == id).map_or(1, |(_, code)| *code)),
                 ReadMode::Fail => Err("읽기 실패".into()),
                 ReadMode::Mismatch => Ok(99),
             }
@@ -484,12 +489,14 @@ mod tests {
         }
     }
 
-    struct Resending {
+    // Replays readings in order; every scripted reading must be consumed.
+    struct Scripted {
         reads: Vec<Result<u8, String>>,
         sets: Vec<u8>,
+        resends: bool,
     }
 
-    impl MonitorControl for Resending {
+    impl MonitorControl for Scripted {
         fn list_monitors(&mut self) -> Result<Vec<DetectedMonitor>, String> {
             Ok(Vec::new())
         }
@@ -501,43 +508,65 @@ mod tests {
             self.reads.remove(0)
         }
         fn resends_unchanged_input(&self) -> bool {
-            true
+            self.resends
         }
     }
 
-    fn trial_with_reads(reads: Vec<Result<u8, String>>) -> (Delivery, Vec<u8>) {
-        let mut fake = Resending { reads, sets: Vec::new() };
+    fn trial_with_reads(resends: bool, reads: Vec<Result<u8, String>>) -> (Delivery, Vec<u8>) {
+        let mut fake = Scripted { reads, sets: Vec::new(), resends };
         let outcome = SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
+        assert!(fake.reads.is_empty(), "읽지 않은 응답: {:?}", fake.reads);
         (outcome.delivery, fake.sets)
     }
 
     #[test]
+    fn skips_switch_when_monitor_already_reports_requested_input() {
+        for resends in [false, true] {
+            assert_eq!(trial_with_reads(resends, vec![Ok(17)]), (Delivery::Delivered, vec![]));
+        }
+    }
+
+    #[test]
+    fn switches_when_current_input_cannot_be_read_first() {
+        assert_eq!(
+            trial_with_reads(false, vec![Err("응답 없음".into()), Ok(17)]),
+            (Delivery::Delivered, vec![17])
+        );
+    }
+
+    #[test]
     fn resends_once_while_monitor_still_reports_previous_input() {
-        assert_eq!(trial_with_reads(vec![Ok(15), Ok(17)]), (Delivery::Delivered, vec![17, 17]));
+        assert_eq!(
+            trial_with_reads(true, vec![Ok(15), Ok(15), Ok(17)]),
+            (Delivery::Delivered, vec![17, 17])
+        );
     }
 
     #[test]
     fn does_not_resend_after_monitor_reports_requested_input() {
-        assert_eq!(trial_with_reads(vec![Ok(17)]), (Delivery::Delivered, vec![17]));
+        assert_eq!(trial_with_reads(true, vec![Ok(15), Ok(17)]), (Delivery::Delivered, vec![17]));
     }
 
     #[test]
     fn does_not_resend_when_readback_fails_after_switching_away() {
-        assert_eq!(trial_with_reads(vec![Err("응답 없음".into())]), (Delivery::Unconfirmed, vec![17]));
+        assert_eq!(
+            trial_with_reads(true, vec![Ok(15), Err("응답 없음".into())]),
+            (Delivery::Unconfirmed, vec![17])
+        );
     }
 
     #[test]
     fn reports_failure_when_input_is_still_unchanged_after_resend() {
-        let (delivery, sets) = trial_with_reads(vec![Ok(15), Ok(15)]);
+        let (delivery, sets) = trial_with_reads(true, vec![Ok(15), Ok(15), Ok(15)]);
         assert!(matches!(delivery, Delivery::Failed { .. }));
         assert_eq!(sets, vec![17, 17]);
     }
 
     #[test]
     fn controls_without_resend_send_only_once() {
-        let mut fake = Fake { fail_set: false, read: ReadMode::Mismatch, sets: Vec::new() };
-        SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
-        assert_eq!(fake.sets.len(), 1);
+        let (delivery, sets) = trial_with_reads(false, vec![Ok(15), Ok(15)]);
+        assert!(matches!(delivery, Delivery::Failed { .. }));
+        assert_eq!(sets, vec![17]);
     }
 
     #[test]
