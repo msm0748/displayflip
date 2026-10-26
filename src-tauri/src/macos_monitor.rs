@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
 
-use crate::ddc::{input_read_packet, parse_input_reply, send_input};
+use crate::ddc::{input_read_packet, input_write_packet, parse_input_reply};
 use crate::domain::{DetectedMonitor, MonitorControl};
 
 // Keep each request/reply together across Tauri commands and shortcut handlers.
@@ -141,9 +141,14 @@ impl MonitorControl for MacControl {
             .lock()
             .map_err(|_| "모니터 통신 잠금을 얻지 못했습니다.".to_string())?;
         let transport = self.transport(id)?;
-        send_input(code, |packet| transport.write(packet))?;
+        transport.write(&input_write_packet(code))?;
         sleep(Duration::from_millis(150));
         Ok(())
+    }
+
+    // Some displays ignore the first write; readback decides whether to send again.
+    fn resends_unchanged_input(&self) -> bool {
+        true
     }
 
     fn get_input(&mut self, id: &str) -> Result<u8, String> {
@@ -283,6 +288,12 @@ mod tests {
             .set_input("missing", 17)
             .unwrap_err()
             .contains("모니터를 찾을 수 없습니다"));
+    }
+
+    #[test]
+    fn unchanged_input_gets_the_resend_some_displays_need() {
+        let control = MacControl { monitors: Ok(Vec::new()) };
+        assert!(control.resends_unchanged_input());
     }
 
     #[test]

@@ -206,6 +206,10 @@ pub trait MonitorControl {
     fn list_monitors(&mut self) -> Result<Vec<DetectedMonitor>, String>;
     fn set_input(&mut self, id: &str, code: u8) -> Result<(), String>;
     fn get_input(&mut self, id: &str) -> Result<u8, String>;
+    // Transports that can drop a write get one resend while readback still shows another input.
+    fn resends_unchanged_input(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -296,13 +300,24 @@ impl Drop for BusyGuard<'_> {
 fn execute<C: MonitorControl + ?Sized>(control: &mut C, role: u8, id: &str, code: u8) -> MonitorOutcome {
     let delivery = match control.set_input(id, code) {
         Err(reason) => Delivery::Failed { reason },
-        Ok(()) => match control.get_input(id) {
-            Err(_) => Delivery::Unconfirmed,
-            Ok(actual) if actual == code => Delivery::Delivered,
-            Ok(actual) => Delivery::Failed {
-                reason: format!("보낸 번호 {code}와 현재 번호 {actual}이 다릅니다."),
-            },
-        },
+        Ok(()) => {
+            let mut read = control.get_input(id);
+            // A failed read usually means the monitor already left this computer's
+            // input, so only an unchanged input earns the resend.
+            if control.resends_unchanged_input()
+                && matches!(read, Ok(actual) if actual != code)
+                && control.set_input(id, code).is_ok()
+            {
+                read = control.get_input(id);
+            }
+            match read {
+                Err(_) => Delivery::Unconfirmed,
+                Ok(actual) if actual == code => Delivery::Delivered,
+                Ok(actual) => Delivery::Failed {
+                    reason: format!("보낸 번호 {code}와 현재 번호 {actual}이 다릅니다."),
+                },
+            }
+        }
     };
     MonitorOutcome { role, monitor_id: id.into(), delivery }
 }
@@ -467,6 +482,62 @@ mod tests {
             Delivery::Failed { reason } => assert!(reason.contains("보낸 번호")),
             other => panic!("{other:?}"),
         }
+    }
+
+    struct Resending {
+        reads: Vec<Result<u8, String>>,
+        sets: Vec<u8>,
+    }
+
+    impl MonitorControl for Resending {
+        fn list_monitors(&mut self) -> Result<Vec<DetectedMonitor>, String> {
+            Ok(Vec::new())
+        }
+        fn set_input(&mut self, _id: &str, code: u8) -> Result<(), String> {
+            self.sets.push(code);
+            Ok(())
+        }
+        fn get_input(&mut self, _id: &str) -> Result<u8, String> {
+            self.reads.remove(0)
+        }
+        fn resends_unchanged_input(&self) -> bool {
+            true
+        }
+    }
+
+    fn trial_with_reads(reads: Vec<Result<u8, String>>) -> (Delivery, Vec<u8>) {
+        let mut fake = Resending { reads, sets: Vec::new() };
+        let outcome = SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
+        (outcome.delivery, fake.sets)
+    }
+
+    #[test]
+    fn resends_once_while_monitor_still_reports_previous_input() {
+        assert_eq!(trial_with_reads(vec![Ok(15), Ok(17)]), (Delivery::Delivered, vec![17, 17]));
+    }
+
+    #[test]
+    fn does_not_resend_after_monitor_reports_requested_input() {
+        assert_eq!(trial_with_reads(vec![Ok(17)]), (Delivery::Delivered, vec![17]));
+    }
+
+    #[test]
+    fn does_not_resend_when_readback_fails_after_switching_away() {
+        assert_eq!(trial_with_reads(vec![Err("응답 없음".into())]), (Delivery::Unconfirmed, vec![17]));
+    }
+
+    #[test]
+    fn reports_failure_when_input_is_still_unchanged_after_resend() {
+        let (delivery, sets) = trial_with_reads(vec![Ok(15), Ok(15)]);
+        assert!(matches!(delivery, Delivery::Failed { .. }));
+        assert_eq!(sets, vec![17, 17]);
+    }
+
+    #[test]
+    fn controls_without_resend_send_only_once() {
+        let mut fake = Fake { fail_set: false, read: ReadMode::Mismatch, sets: Vec::new() };
+        SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
+        assert_eq!(fake.sets.len(), 1);
     }
 
     #[test]
