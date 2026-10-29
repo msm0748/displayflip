@@ -10,6 +10,8 @@ use crate::domain::{DetectedMonitor, MonitorControl};
 // Keep each request/reply together across Tauri commands and shortcut handlers.
 static DDC_BUS: Mutex<()> = Mutex::new(());
 const GAP: Duration = Duration::from_millis(50);
+// Time for a monitor to lock onto a newly selected input before readback.
+const SWITCH_SETTLE: Duration = Duration::from_secs(2);
 const DDC_HINT: &str =
     "모니터 설정에서 DDC/CI를 켜고, 케이블이나 허브가 DDC/CI를 지원하는지 확인해주세요.";
 
@@ -141,14 +143,18 @@ impl MonitorControl for MacControl {
             .lock()
             .map_err(|_| "모니터 통신 잠금을 얻지 못했습니다.".to_string())?;
         let transport = self.transport(id)?;
-        transport.write(&input_write_packet(code))?;
-        sleep(Duration::from_millis(150));
-        Ok(())
+        transport.write(&input_write_packet(code))
     }
 
     // Some displays ignore the first write; readback decides whether to send again.
     fn resends_unchanged_input(&self) -> bool {
         true
+    }
+
+    // Holding the bus keeps other requests off monitors that are still switching.
+    fn wait_for_switch(&mut self) {
+        let _bus = DDC_BUS.lock();
+        sleep(SWITCH_SETTLE);
     }
 
     fn get_input(&mut self, id: &str) -> Result<u8, String> {

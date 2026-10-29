@@ -210,6 +210,7 @@ pub trait MonitorControl {
     fn resends_unchanged_input(&self) -> bool {
         false
     }
+    fn wait_for_switch(&mut self) {}
 }
 
 #[derive(Default)]
@@ -246,7 +247,8 @@ impl SwitchGate {
         }
         self.busy = true;
         let guard = BusyGuard(&mut self.busy);
-        let outcome = execute(control, index, &selected.id, code.unwrap());
+        let command = PlannedCommand { role: index, monitor_id: selected.id.clone(), code: code.unwrap() };
+        let outcome = execute(control, &[command]).remove(0);
         drop(guard);
         Ok(outcome)
     }
@@ -264,10 +266,7 @@ impl SwitchGate {
         let planned = plan_switch(settings, destination, connected_ids)?;
         self.busy = true;
         let gate = BusyGuard(&mut self.busy);
-        let mut outcomes = Vec::new();
-        for command in planned {
-            outcomes.push(execute(control, command.role, &command.monitor_id, command.code));
-        }
+        let outcomes = execute(control, &planned);
         drop(gate);
         Ok(outcomes)
     }
@@ -283,7 +282,7 @@ impl SwitchGate {
         }
         self.busy = true;
         let gate = BusyGuard(&mut self.busy);
-        let outcome = execute(control, 0, id, code);
+        let outcome = execute(control, &[PlannedCommand { role: 0, monitor_id: id.into(), code }]).remove(0);
         drop(gate);
         Ok(outcome)
     }
@@ -297,33 +296,71 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
-fn execute<C: MonitorControl + ?Sized>(control: &mut C, role: u8, id: &str, code: u8) -> MonitorOutcome {
-    // Re-selecting the current input makes some monitors resync and flicker.
-    if control.get_input(id) == Ok(code) {
-        return MonitorOutcome { role, monitor_id: id.into(), delivery: Delivery::Delivered };
+fn execute<C: MonitorControl + ?Sized>(control: &mut C, commands: &[PlannedCommand]) -> Vec<MonitorOutcome> {
+    let mut deliveries: Vec<Option<Delivery>> = commands
+        .iter()
+        .map(|command| {
+            // Re-selecting the current input makes some monitors resync and flicker.
+            if control.get_input(&command.monitor_id) == Ok(command.code) {
+                return Some(Delivery::Delivered);
+            }
+            control
+                .set_input(&command.monitor_id, command.code)
+                .err()
+                .map(|reason| Delivery::Failed { reason })
+        })
+        .collect();
+    let sent: Vec<usize> = (0..commands.len()).filter(|&index| deliveries[index].is_none()).collect();
+    let resends = control.resends_unchanged_input();
+    let resent = verify(control, commands, &sent, &mut deliveries, resends);
+    verify(control, commands, &resent, &mut deliveries, false);
+    commands
+        .iter()
+        .zip(deliveries)
+        .map(|(command, delivery)| MonitorOutcome {
+            role: command.role,
+            monitor_id: command.monitor_id.clone(),
+            delivery: delivery.expect("every sent input is read back"),
+        })
+        .collect()
+}
+
+// Reads back the monitors just written and returns the ones written again.
+fn verify<C: MonitorControl + ?Sized>(
+    control: &mut C,
+    commands: &[PlannedCommand],
+    sent: &[usize],
+    deliveries: &mut [Option<Delivery>],
+    resend: bool,
+) -> Vec<usize> {
+    if sent.is_empty() {
+        return Vec::new();
     }
-    let delivery = match control.set_input(id, code) {
-        Err(reason) => Delivery::Failed { reason },
-        Ok(()) => {
-            let mut read = control.get_input(id);
-            // A failed read usually means the monitor already left this computer's
-            // input, so only an unchanged input earns the resend.
-            if control.resends_unchanged_input()
-                && matches!(read, Ok(actual) if actual != code)
-                && control.set_input(id, code).is_ok()
-            {
-                read = control.get_input(id);
-            }
-            match read {
-                Err(_) => Delivery::Unconfirmed,
-                Ok(actual) if actual == code => Delivery::Delivered,
-                Ok(actual) => Delivery::Failed {
-                    reason: format!("보낸 번호 {code}와 현재 번호 {actual}이 다릅니다."),
-                },
-            }
+    // DDC traffic while a monitor is still locking onto this computer's signal
+    // can leave it black until it is power-cycled.
+    control.wait_for_switch();
+    let mut resent = Vec::new();
+    for &index in sent {
+        let PlannedCommand { monitor_id, code, .. } = &commands[index];
+        let read = control.get_input(monitor_id);
+        // A failed read usually means the monitor already left this computer's
+        // input, so only an unchanged input earns the resend.
+        if resend
+            && matches!(read, Ok(actual) if actual != *code)
+            && control.set_input(monitor_id, *code).is_ok()
+        {
+            resent.push(index);
+            continue;
         }
-    };
-    MonitorOutcome { role, monitor_id: id.into(), delivery }
+        deliveries[index] = Some(match read {
+            Err(_) => Delivery::Unconfirmed,
+            Ok(actual) if actual == *code => Delivery::Delivered,
+            Ok(actual) => Delivery::Failed {
+                reason: format!("보낸 번호 {code}와 현재 번호 {actual}이 다릅니다."),
+            },
+        });
+    }
+    resent
 }
 
 #[cfg(test)]
@@ -494,26 +531,91 @@ mod tests {
         reads: Vec<Result<u8, String>>,
         sets: Vec<u8>,
         resends: bool,
+        // Bus traffic and settle waits in the order they happened.
+        events: Vec<String>,
     }
 
     impl MonitorControl for Scripted {
         fn list_monitors(&mut self) -> Result<Vec<DetectedMonitor>, String> {
             Ok(Vec::new())
         }
-        fn set_input(&mut self, _id: &str, code: u8) -> Result<(), String> {
+        fn set_input(&mut self, id: &str, code: u8) -> Result<(), String> {
             self.sets.push(code);
+            self.events.push(format!("set {id} {code}"));
             Ok(())
         }
-        fn get_input(&mut self, _id: &str) -> Result<u8, String> {
+        fn get_input(&mut self, id: &str) -> Result<u8, String> {
+            self.events.push(format!("read {id}"));
             self.reads.remove(0)
         }
         fn resends_unchanged_input(&self) -> bool {
             self.resends
         }
+        fn wait_for_switch(&mut self) {
+            self.events.push("wait".into());
+        }
+    }
+
+    fn scripted(resends: bool, reads: Vec<Result<u8, String>>) -> Scripted {
+        Scripted { reads, sets: Vec::new(), resends, events: Vec::new() }
+    }
+
+    #[test]
+    fn reads_back_only_after_waiting_for_the_monitor_to_settle() {
+        let mut fake = scripted(false, vec![Ok(15), Ok(17)]);
+        SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
+        assert_eq!(fake.events, ["read mon-1", "set mon-1 17", "wait", "read mon-1"]);
+    }
+
+    #[test]
+    fn resend_waits_again_before_the_final_readback() {
+        let mut fake = scripted(true, vec![Ok(15), Ok(15), Ok(17)]);
+        SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
+        assert_eq!(
+            fake.events,
+            ["read mon-1", "set mon-1 17", "wait", "read mon-1", "set mon-1 17", "wait", "read mon-1"]
+        );
+    }
+
+    #[test]
+    fn skipped_switch_does_not_wait() {
+        let mut fake = scripted(true, vec![Ok(17)]);
+        SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
+        assert_eq!(fake.events, ["read mon-1"]);
+    }
+
+    #[test]
+    fn switching_both_monitors_sends_both_before_one_shared_wait() {
+        let mut fake = scripted(false, vec![Ok(15), Ok(17), Ok(17), Ok(15)]);
+        let outcomes = SwitchGate::default()
+            .run(&mut fake, &ready(), Destination::Mac, &["mon-1".into(), "mon-2".into()])
+            .unwrap();
+        assert_eq!(
+            fake.events,
+            ["read mon-1", "set mon-1 17", "read mon-2", "set mon-2 15", "wait", "read mon-1", "read mon-2"]
+        );
+        assert!(outcomes.iter().all(|outcome| outcome.delivery == Delivery::Delivered));
+    }
+
+    #[test]
+    fn switching_both_monitors_resends_only_the_unchanged_one() {
+        let mut fake = scripted(true, vec![Ok(15), Ok(17), Ok(15), Ok(15), Ok(17)]);
+        let outcomes = SwitchGate::default()
+            .run(&mut fake, &ready(), Destination::Mac, &["mon-1".into(), "mon-2".into()])
+            .unwrap();
+        assert_eq!(
+            fake.events,
+            [
+                "read mon-1", "set mon-1 17", "read mon-2", "set mon-2 15", "wait",
+                "read mon-1", "set mon-1 17", "read mon-2", "wait", "read mon-1",
+            ]
+        );
+        assert!(outcomes.iter().all(|outcome| outcome.delivery == Delivery::Delivered));
+        assert!(fake.reads.is_empty());
     }
 
     fn trial_with_reads(resends: bool, reads: Vec<Result<u8, String>>) -> (Delivery, Vec<u8>) {
-        let mut fake = Scripted { reads, sets: Vec::new(), resends };
+        let mut fake = scripted(resends, reads);
         let outcome = SwitchGate::default().trial(&mut fake, "mon-1", 17).unwrap();
         assert!(fake.reads.is_empty(), "읽지 않은 응답: {:?}", fake.reads);
         (outcome.delivery, fake.sets)
