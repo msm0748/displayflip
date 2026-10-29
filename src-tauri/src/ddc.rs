@@ -14,18 +14,6 @@ pub fn input_write_packet(value: u8) -> [u8; 6] {
     ]
 }
 
-pub fn send_input(
-    value: u8,
-    mut write: impl FnMut(&[u8]) -> Result<(), String>,
-) -> Result<(), String> {
-    let packet = input_write_packet(value);
-    write(&packet)?;
-    // Some displays need two sends. If the first send switched away, the old
-    // input may already be disconnected; readback will mark it Unconfirmed.
-    let _ = write(&packet);
-    Ok(())
-}
-
 pub fn parse_input_reply(reply: &[u8]) -> Result<u8, String> {
     if reply.len() < 11 || reply[0] != 0x6e || reply[1] != 0x88 || reply[2] != 0x02 {
         return Err("모니터가 올바른 DDC/CI 응답을 보내지 않았습니다.".into());
@@ -48,20 +36,6 @@ mod tests {
     const HDMI_REPLY: [u8; 11] = [
         0x6e, 0x88, 0x02, 0x00, 0x60, 0x00, 0x00, 0x12, 0x00, 0x11, 0xd7,
     ];
-
-    #[test]
-    fn successful_switch_is_not_failed_when_retransmission_loses_the_old_input() {
-        let mut results = [Ok(()), Err("입력 전환으로 연결 해제".into())].into_iter();
-        assert_eq!(send_input(17, |_| results.next().unwrap()), Ok(()));
-    }
-
-    #[test]
-    fn first_send_failure_is_reported() {
-        assert_eq!(
-            send_input(17, |_| Err("DDC 전송 거부".into())),
-            Err("DDC 전송 거부".into())
-        );
-    }
 
     #[test]
     fn input_request_uses_vcp_60_and_ioav_checksum() {
